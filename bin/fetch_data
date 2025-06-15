@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+ROOT_DIR="$( cd "$( dirname "$( dirname "${BASH_SOURCE[0]}" )" )" >/dev/null 2>&1 && pwd )"
+
+mkdir -p data/hg38/
+curl https://storage.googleapis.com/basenji_barnyard2/hg38.ml.fa.gz > data/hg38/hg38.ml.fa.gz
+gunzip data/hg38/hg38.ml.fa.gz
+curl https://storage.googleapis.com/basenji_barnyard2/sequences_human.bed > data/hg38/human-sequences.bed
+
+echo "Done 🎉"
