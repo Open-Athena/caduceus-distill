@@ -6,6 +6,7 @@ import time
 from pyfaidx import Fasta
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModelForMaskedLM
+from torch.cuda.amp import autocast
 
 
 class FastaDataset(Dataset):
@@ -108,10 +109,14 @@ def generate_soft_labels(
             tokens_since_last_print += batch_tokens
             total_tokens += batch_tokens
 
-            with torch.inference_mode():
+            # Use autocast for FP16 mixed-precision inference to boost performance on T4 GPUs.
+            # Enabled only when using CUDA.
+            with torch.inference_mode(), autocast(enabled=(device == "cuda")):
                 outputs = model(input_ids)
                 logits = outputs.logits
-                probabilities = torch.softmax(logits, dim=-1)
+                # For numerical stability, cast logits to float32 before softmax.
+                # Inside autocast, logits are fp16.
+                probabilities = torch.softmax(logits.float(), dim=-1)
 
             # Sample GPU metrics after the main workload of the batch
             if nvml_available:
