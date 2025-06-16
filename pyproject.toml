@@ -12,8 +12,17 @@ dependencies = [
     "xarray>=2025.6.1",
     "zarr>=3.0.8",
     "setuptools>=80.9.0",
-    "mamba-ssm==1.2.0.post1",
 ]
+
+[project.optional-dependencies]
+mamba = ["mamba-ssm==1.2.0.post1"]
 
 [tool.uv]
 no-build-isolation-package = ["mamba-ssm"]
+
+[[tool.uv.dependency-metadata]]
+name = "mamba-ssm"
+version = "1.2.0.post1"
+# TODO: do I need to list all?
+# https://docs.astral.sh/uv/concepts/projects/config/#build-isolation
+requires-dist = ["torch", "einops"]
