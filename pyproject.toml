@@ -26,3 +26,8 @@ version = "1.2.0.post1"
 # TODO: do I need to list all?
 # https://docs.astral.sh/uv/concepts/projects/config/#build-isolation
 requires-dist = ["torch", "einops"]
+
+[dependency-groups]
+dev = [
+    "black>=25.1.0",
+]
