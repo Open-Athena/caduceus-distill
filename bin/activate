@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+if [ -z "${BASH_SOURCE[0]}" ]; then
+    SCRIPT_PATH="$0"
+else
+    SCRIPT_PATH="${BASH_SOURCE[0]}"
+fi
+
+REPO_ROOT="$( cd "$( dirname "$( dirname "${SCRIPT_PATH}" )" )" >/dev/null 2>&1 && pwd )"
+
+uv --project="${REPO_ROOT}" sync
+
+set -o allexport
+
+source "${REPO_ROOT}/.venv/bin/activate"
+
+if [ -f "${REPO_ROOT}/.env" ]; then
+    source "${REPO_ROOT}/.env"
+fi
+
+set +o allexport
