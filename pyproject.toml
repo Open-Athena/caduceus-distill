@@ -5,13 +5,15 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mamba-ssm==1.2.0.post1",
     "numpy<2",
     "pyfaidx>=0.8.1.4",
-    # NOTE: needed for triton
-    "setuptools>=80.9.0",
     "torch==2.2.0",
     "transformers==4.38.1",
     "xarray>=2025.6.1",
     "zarr>=3.0.8",
+    "setuptools>=80.9.0",
+    "mamba-ssm==1.2.0.post1",
 ]
+
+[tool.uv]
+no-build-isolation-package = ["mamba-ssm"]
