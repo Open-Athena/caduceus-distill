@@ -50,8 +50,16 @@ def generate_soft_labels(
     )
 
     dataset = FastaDataset(fasta_file, chunk_size=chunk_size, tokenizer=tokenizer)
-    # drop_last=False is the default, so the last batch might be smaller.
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+    # Allow the CPU to prepare batches in the background while the GPU is processing.
+    num_workers = min(os.cpu_count(), 8)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True if device == "cuda" else False,
+    )
 
     # Initialize NVML for GPU monitoring conditionally
     nvml_available = False
