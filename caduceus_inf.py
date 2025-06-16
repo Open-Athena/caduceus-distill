@@ -2,10 +2,10 @@ import os
 import argparse
 import torch
 import xarray as xr
+import time
 from pyfaidx import Fasta
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModelForMaskedLM
-from tqdm import tqdm
 
 
 class FastaDataset(Dataset):
@@ -50,47 +50,182 @@ def generate_soft_labels(
     )
 
     dataset = FastaDataset(fasta_file, chunk_size=chunk_size, tokenizer=tokenizer)
+    # drop_last=False is the default, so the last batch might be smaller.
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
-    for batch_idx, (input_ids, chr_names, starts, ends) in tqdm(
-        enumerate(dataloader), total=len(dataloader)
-    ):
-        input_ids = input_ids.to(device)
+    # Initialize NVML for GPU monitoring conditionally
+    nvml_available = False
+    handle = None
+    if device == "cuda":
+        try:
+            # pynvml is imported conditionally later to allow running on CPU-only machines
+            import pynvml
 
-        with torch.inference_mode():
-            outputs = model(input_ids)
-            logits = outputs.logits
-            probabilities = torch.softmax(logits, dim=-1)
+            pynvml.nvmlInit()
 
-        batch_indices = list(
-            range(batch_idx * batch_size, (batch_idx + 1) * batch_size)
-        )
+            # Assert that there is exactly one GPU
+            device_count = pynvml.nvmlDeviceGetCount()
+            assert device_count == 1, (
+                f"Expected 1 GPU, but found {device_count}. "
+                "This script is designed for single-GPU execution only."
+            )
 
-        ds = xr.Dataset(
-            {
-                "input_ids": (["sample", "sequence"], input_ids.cpu().numpy()),
-                "logits": (["sample", "sequence", "vocab"], logits.cpu().numpy()),
-                "probabilities": (
-                    ["sample", "sequence", "vocab"],
-                    probabilities.cpu().numpy(),
-                ),
-            },
-            coords={
-                "sample": batch_indices,
-                "sequence": range(input_ids.shape[1]),
-                "vocab": range(logits.shape[-1]),
-                "chr_name": (["sample"], list(chr_names)),
-                "start": (["sample"], [int(s) for s in starts]),
-                "end": (["sample"], [int(e) for e in ends]),
-            },
-        )
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            nvml_available = True
+        except (ImportError, pynvml.NVMLError):
+            print(
+                "Warning: pynvml library not found or NVIDIA driver/NVML issue. "
+                "GPU metrics will not be reported."
+            )
 
-        ds.to_zarr(
-            output_path,
-            zarr_format=2,
-            **(dict(append_dim="sample") if os.path.exists(output_path) else {}),
-            consolidated=True,
-        )
+    # Initialize tracking variables
+    last_print_time = time.time()
+    total_tokens = 0
+    tokens_since_last_print = 0
+    total_batches = len(dataloader)
+    start_time = time.time()
+    processed_batches = 0  # Track number of batches processed
+    was_interrupted = False
+
+    # Initialize variables for aggregating GPU stats
+    sum_gpu_core_util = 0
+    sum_gpu_mem_io_util = 0
+    gpu_samples_count = 0
+
+    try:
+        for batch_idx, (input_ids, chr_names, starts, ends) in enumerate(dataloader):
+            processed_batches = batch_idx + 1  # Update the count of processed batches
+            input_ids = input_ids.to(device)
+            batch_tokens = input_ids.numel()
+            tokens_since_last_print += batch_tokens
+            total_tokens += batch_tokens
+
+            with torch.inference_mode():
+                outputs = model(input_ids)
+                logits = outputs.logits
+                probabilities = torch.softmax(logits, dim=-1)
+
+            # Sample GPU metrics after the main workload of the batch
+            if nvml_available:
+                try:
+                    util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                    sum_gpu_core_util += util.gpu
+                    sum_gpu_mem_io_util += util.memory
+                    gpu_samples_count += 1
+                except pynvml.NVMLError:
+                    # If a single sample fails, we can just skip it.
+                    pass
+
+            # Correctly calculate global indices for samples in the current batch.
+            # This handles the last batch, which might be smaller than batch_size.
+            num_samples_in_batch = input_ids.shape[0]
+            start_sample_idx = batch_idx * batch_size
+            batch_indices = list(
+                range(start_sample_idx, start_sample_idx + num_samples_in_batch)
+            )
+
+            ds = xr.Dataset(
+                {
+                    "input_ids": (["sample", "sequence"], input_ids.cpu().numpy()),
+                    "logits": (["sample", "sequence", "vocab"], logits.cpu().numpy()),
+                    "probabilities": (
+                        ["sample", "sequence", "vocab"],
+                        probabilities.cpu().numpy(),
+                    ),
+                },
+                coords={
+                    "sample": batch_indices,
+                    "sequence": range(input_ids.shape[1]),
+                    "vocab": range(logits.shape[-1]),
+                    "chr_name": (["sample"], list(chr_names)),
+                    "start": (["sample"], [int(s) for s in starts]),
+                    "end": (["sample"], [int(e) for e in ends]),
+                },
+            )
+
+            ds.to_zarr(
+                output_path,
+                zarr_format=2,
+                **(dict(append_dim="sample") if os.path.exists(output_path) else {}),
+                consolidated=True,
+            )
+
+            # Log progress and tokens/second every 5 seconds
+            current_time = time.time()
+            if current_time - last_print_time >= 5:
+                elapsed_since_last = current_time - last_print_time
+                tokens_per_second = tokens_since_last_print / elapsed_since_last
+                progress_percent = (batch_idx + 1) / total_batches * 100
+
+                # Get GPU metrics if available
+                gpu_metrics_str = ""
+                if nvml_available:
+                    try:
+                        # Calculate average utilization since last print
+                        avg_gpu_core = (
+                            sum_gpu_core_util / gpu_samples_count
+                            if gpu_samples_count > 0
+                            else 0
+                        )
+                        avg_gpu_mem_io = (
+                            sum_gpu_mem_io_util / gpu_samples_count
+                            if gpu_samples_count > 0
+                            else 0
+                        )
+
+                        # Get current memory usage
+                        mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                        mem_used_mib = mem_info.used // (1024**2)
+                        mem_total_mib = mem_info.total // (1024**2)
+
+                        gpu_metrics_str = (
+                            f" | Avg GPU Core: {avg_gpu_core:.1f}%, Avg MemIO: {avg_gpu_mem_io:.1f}%, "
+                            f"VRAM: {mem_used_mib}/{mem_total_mib} MiB"
+                        )
+                    except pynvml.NVMLError:
+                        # Handle potential error during query
+                        gpu_metrics_str = " | GPU Metrics: N/A"
+
+                print(
+                    f"Progress: {progress_percent:.2f}% ({batch_idx + 1}/{total_batches} batches) | "
+                    f"Speed: {tokens_per_second:.2f} tokens/sec{gpu_metrics_str}"
+                )
+
+                # Reset tracking for next interval
+                last_print_time = current_time
+                tokens_since_last_print = 0
+                sum_gpu_core_util = 0
+                sum_gpu_mem_io_util = 0
+                gpu_samples_count = 0
+
+    except KeyboardInterrupt:
+        was_interrupted = True
+        print("\nInterrupted by user!")
+
+    except Exception as e:
+        was_interrupted = True
+        print(f"\nError occurred: {str(e)}")
+
+    finally:
+        # Shutdown NVML if it was initialized
+        if nvml_available:
+            pynvml.nvmlShutdown()
+
+        # Calculate statistics for either completion or interruption
+        total_elapsed = time.time() - start_time
+
+        if processed_batches == 0:
+            print("No data was processed!")
+        else:
+            progress_percent = processed_batches / total_batches * 100
+            completion_status = "Partial completion" if was_interrupted else "Completed"
+
+            print(
+                f"\n{completion_status}: {progress_percent:.2f}% ({processed_batches}/{total_batches} batches) | "
+                f"Total tokens processed: {total_tokens} | "
+                f"Average speed: {total_tokens/total_elapsed:.2f} tokens/sec | "
+                f"Total time: {total_elapsed:.2f}s"
+            )
 
 
 if __name__ == "__main__":
@@ -109,7 +244,7 @@ if __name__ == "__main__":
         "--batch-size", type=int, default=1, help="Batch size (default: 1)"
     )
     parser.add_argument(
-        "--device", default="cuda", help="Device to use (default: cuda)"
+        "--device", default="cuda", help="Device to use (e.g., 'cuda' or 'cpu')"
     )
 
     args = parser.parse_args()

@@ -40,6 +40,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "numpy" },
     { name = "pyfaidx" },
+    { name = "pynvml" },
     { name = "setuptools" },
     { name = "torch" },
     { name = "transformers" },
@@ -62,6 +63,7 @@ requires-dist = [
     { name = "mamba-ssm", marker = "extra == 'mamba'", specifier = "==1.2.0.post1" },
     { name = "numpy", specifier = "<2" },
     { name = "pyfaidx", specifier = ">=0.8.1.4" },
+    { name = "pynvml", specifier = ">=12.0.0" },
     { name = "setuptools", specifier = ">=80.9.0" },
     { name = "torch", specifier = "==2.2.0" },
     { name = "transformers", specifier = "==4.38.1" },
@@ -475,6 +477,15 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-ml-py"
+version = "12.575.51"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d2/4d/6f017814ed5ac28e08e1b8a62e3a258957da27582c89b7f8f8b15ac3d2e7/nvidia_ml_py-12.575.51.tar.gz", hash = "sha256:6490e93fea99eb4e966327ae18c6eec6256194c921f23459c8767aee28c54581", size = 46597 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/db/24/552ebea28f0570b9e65e62b50287a273804c9f997cc1c2dcd4e2d64b9e7d/nvidia_ml_py-12.575.51-py3-none-any.whl", hash = "sha256:eb8641800d98ce40a22f479873f34b482e214a7e80349c63be51c3919845446e", size = 47547 },
+]
+
+[[package]]
 name = "nvidia-nccl-cu12"
 version = "2.19.3"
 source = { registry = "https://pypi.org/simple" }
@@ -569,6 +580,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/16/28/caee630bbc77d0f5a5a28e74c3ff35700e19a9c70090a8c9c9a3ff123a8b/pyfaidx-0.8.1.4.tar.gz", hash = "sha256:e73b32ad32ab972f284c97e63d70fef3671a118e2fe5aefb5980967a95082ce8", size = 103099 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/35/34/26c6e3b4dea9bc723ada87ab0efbad162dd2b9747ba1ac78fd34da90ab9d/pyfaidx-0.8.1.4-py3-none-any.whl", hash = "sha256:daa5df40c82f94bd21bc2561ee437a7efec684bb1ab7c766234fb51b70c177ee", size = 28097 },
+]
+
+[[package]]
+name = "pynvml"
+version = "12.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "nvidia-ml-py" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/26/6f/6b5880ed0239e85b9a39aed103b65b2ef81425beef9f45e5c035bf008330/pynvml-12.0.0.tar.gz", hash = "sha256:299ce2451a6a17e6822d6faee750103e25b415f06f59abb8db65d30f794166f5", size = 33636 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ed/df/f7cf07a65a96dd11d71f346f9c2863accdd4784da83af7181b067d556cbc/pynvml-12.0.0-py3-none-any.whl", hash = "sha256:fdff84b62a27dbe98e08e1a647eb77342bef1aebe0878bcd15e99a83fcbecb9e", size = 26560 },
 ]
 
 [[package]]
