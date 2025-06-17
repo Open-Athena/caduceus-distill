@@ -55,6 +55,7 @@ ignore = [
     "F811",  # ignore redefinition of a function
     "B019",  # ignore functools cache/lru_cache
     "UP030", # allow explicit positional string formatting
+    "C901",  # ignore McCabe complexity
 ]
 select = [
     "B",   # flake8-bugbear
@@ -101,9 +102,5 @@ disallow_untyped_decorators = false
 disallow_untyped_calls = false
 
 [[tool.mypy.overrides]]
-module = [
-    "pyfaidx.*",
-    "pynvml.*",
-    "transformers.*",
-]
+module = ["pyfaidx.*", "pynvml.*", "transformers.*"]
 ignore_missing_imports = true
