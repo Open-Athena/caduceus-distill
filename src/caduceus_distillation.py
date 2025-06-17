@@ -220,6 +220,7 @@ def main() -> None:
         help="W&B project name",
     )
     parser.add_argument("--run_name", type=str, default=None, help="W&B run name")
+    parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
 
     args = parser.parse_args()
 
@@ -251,7 +252,9 @@ def main() -> None:
     model = StudentCaduceus(lr=args.lr, temperature=args.temperature, alpha=args.alpha)
 
     # Setup logger
-    logger = WandbLogger(project=args.project_name, name=args.run_name)
+    logger: WandbLogger | None = None
+    if not args.no_wandb:
+        logger = WandbLogger(project=args.project_name, name=args.run_name)
 
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
