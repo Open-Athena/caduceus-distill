@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+
+set -e
+
+# 1. Read branch name from the first argument ($1), with a fallback to 'main'
+BRANCH_NAME=${1:-main}
+echo "--- Running Bootstrap Script for branch: $BRANCH_NAME ---"
+
+# 2. Detect environment and set base directory
+if [ -n "$KAGGLE_KERNEL_RUN_TYPE" ]; then
+    echo "Kaggle environment detected."
+    BASE_DIR="/kaggle/working"
+else
+    echo "Colab (or other) environment detected."
+    BASE_DIR="/content"
+fi
+
+# 3. Define repository details
+REPO_URL="https://github.com/tabtab-labs/caduceus-distill.git"
+REPO_DIR="$BASE_DIR/caduceus-distill"
+echo "Repository will be at: $REPO_DIR"
+
+# 4. Idempotently clone the specific repository branch
+if [ ! -d "$REPO_DIR" ]; then
+    echo "Cloning branch '$BRANCH_NAME' from repository..."
+    # Use -b to specify the branch and --single-branch for a faster, smaller clone
+    git clone -b "$BRANCH_NAME" --single-branch "$REPO_URL" "$REPO_DIR"
+else
+    echo "Repository already exists. Skipping clone. (Note: Not switching branches if it's the wrong one)"
+fi
+
+# 5. Execute the main setup script from within the cloned repository
+echo ">>> Executing main setup script from within the repository..."
+(cd "$REPO_DIR" && bash ./bin/notebook_setup)
+
+echo "--- Bootstrap finished successfully! ---"
+echo "Next step in your notebook: %cd $REPO_DIR"
