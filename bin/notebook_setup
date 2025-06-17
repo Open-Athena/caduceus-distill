@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Set up the environment and fetches data, skipping steps that are already complete.
+
+set -e
+
+echo "--- Running Main Setup (setup.sh) ---"
+
+# 1. Install/Sync Python dependencies using uv
+echo ">>> Syncing Python environment with uv..."
+pip install -q uv # Ensure uv is present
+uv sync --quiet && uv sync --quiet --extra mamba
+echo ">>> Environment is up to date."
+
+# 2. Fetch data idempotently
+DATA_FILE="data/hg38/hg38.ml.fa"
+echo ">>> Checking for data file: $DATA_FILE"
+
+if [ -f "$DATA_FILE" ]; then
+    echo "Data file already exists. Skipping download."
+else
+    echo "Data file not found. Fetching data..."
+    ./bin/fetch_data
+    echo "Data fetching complete."
+fi
+
+echo "--- Setup complete! ---"
