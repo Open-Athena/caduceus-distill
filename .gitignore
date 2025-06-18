@@ -1,4 +1,5 @@
 data/
+.local/
 
 # Python-generated files
 __pycache__/
