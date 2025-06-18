@@ -63,6 +63,7 @@ def generate_soft_labels(
     chunk_size: int = 131072,
     batch_size: int = 1,
     device: Literal["cuda", "cpu"] = "cuda",
+    max_batches: int | None = None,
 ) -> None:
     model_name: str = "kuleshov-group/caduceus-ps_seqlen-131k_d_model-256_n_layer-16"
 
@@ -129,6 +130,8 @@ def generate_soft_labels(
 
     try:
         for batch_idx, (input_ids, chr_names, starts, ends) in enumerate(dataloader):
+            if max_batches is not None and batch_idx >= max_batches:
+                break
             processed_batches = batch_idx + 1
             input_ids = input_ids.to(device)
             batch_tokens: int = input_ids.numel()
@@ -282,8 +285,19 @@ if __name__ == "__main__":
         default="cuda",
         help="Device to use (e.g., 'cuda' or 'cpu')",
     )
+    parser.add_argument(
+        "--max-batches",
+        type=int,
+        default=None,
+        help="Maximum number of batches to process (default: all batches)",
+    )
 
     args = parser.parse_args()
     generate_soft_labels(
-        args.fasta_file, args.output_path, args.chunk_size, args.batch_size, args.device
+        args.fasta_file,
+        args.output_path,
+        args.chunk_size,
+        args.batch_size,
+        args.device,
+        args.max_batches,
     )
