@@ -32,7 +32,7 @@ def distillation_loss(
         Weighted sum of distillation and hard target loss
     """
     # Soft loss (distillation)
-    teacher_probs = F.softmax(teacher_logits / temperature, dim=-1)
+    teacher_log_probs = F.log_softmax(teacher_logits / temperature, dim=-1)
     student_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
     # NOTE: re T^2 scaling, from `Distilling the Knowledge in a Neural Network`:
     # > Since the magnitudes of the gradients p roduced by the soft targets scale as 1/T 2 it is important
@@ -40,9 +40,9 @@ def distillation_loss(
     # > of the hard and soft targets remain roughly unchanged if the temperature used for distillation is changed
     # > while experimenting with meta-parameters.
     # NOTE: `batchmean` is required per pytorch docs: https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.kl_div.html
-    soft_loss = F.kl_div(student_log_probs, teacher_probs, reduction="batchmean") * (
-        temperature**2
-    )
+    soft_loss = F.kl_div(
+        student_log_probs, teacher_log_probs, reduction="batchmean", log_target=True
+    ) * (temperature**2)
 
     # Hard loss (cross-entropy)
     B, T, V = student_logits.shape
