@@ -12,30 +12,45 @@ from transformers import AutoConfig, AutoModelForMaskedLM
 
 
 def distillation_loss(
-    student_logits: torch.Tensor, teacher_logits: torch.Tensor, temperature: float = 4.0
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    temperature: float = 4.0,
+    alpha: float = 0.8,
 ) -> torch.Tensor:
     """
-    Calculate knowledge distillation loss using KL divergence with temperature scaling.
-
-    Derived from: Distilling the Knowledge in a Neural Network (2015) [https://arxiv.org/pdf/1503.02531]
-
-    See: https://github.com/microsoft/semiparametric-distillation/blob/b7153f1e8bbbe6d8261f64c23828611a5419a13a/kd.py#L15-L22
+    Calculate combined distillation loss (KL divergence with temperature scaling + cross-entropy with hard targets).
 
     Args:
         student_logits: Raw logits from student model
         teacher_logits: Raw logits from teacher model
+        input_ids: Ground truth token ids (hard targets)
         temperature: Temperature for softening probability distributions
+        alpha: Weight for distillation loss (1-alpha for hard loss)
 
     Returns:
-        KL divergence loss scaled by temperature squared
+        Weighted sum of distillation and hard target loss
     """
+    # Soft loss (distillation)
     teacher_probs = F.softmax(teacher_logits / temperature, dim=-1)
     student_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
-
-    loss = F.kl_div(student_log_probs, teacher_probs, reduction="batchmean") * (
+    # NOTE: re T^2 scaling, from `Distilling the Knowledge in a Neural Network`:
+    # > Since the magnitudes of the gradients p roduced by the soft targets scale as 1/T 2 it is important
+    # > to multiply them by T2 when using both hard and soft targets.  This ensures that the relative contributions
+    # > of the hard and soft targets remain roughly unchanged if the temperature used for distillation is changed
+    # > while experimenting with meta-parameters.
+    # NOTE: `batchmean` is required per pytorch docs: https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.kl_div.html
+    soft_loss = F.kl_div(student_log_probs, teacher_probs, reduction="batchmean") * (
         temperature**2
     )
-    return loss
+
+    # Hard loss (cross-entropy)
+    B, T, V = student_logits.shape
+    student_logits_flat = student_logits.view(B * T, V)
+    input_ids_flat = input_ids.view(B * T)
+    hard_loss = F.cross_entropy(student_logits_flat, input_ids_flat)
+
+    return alpha * soft_loss + (1 - alpha) * hard_loss
 
 
 EXAMPLE_T = tuple[torch.Tensor, torch.Tensor]
@@ -115,12 +130,13 @@ class StudentCaduceus(L.LightningModule):
     def training_step(self, batch: EXAMPLE_T, batch_idx: int) -> torch.Tensor:
         input_ids, teacher_logits = batch
 
-        # Get student logits
         outputs = self.student(input_ids)
         student_logits = outputs.logits
 
-        # Calculate distillation loss
-        loss = distillation_loss(student_logits, teacher_logits, self.temperature)
+        # Calculate combined loss
+        loss = distillation_loss(
+            student_logits, teacher_logits, input_ids, self.temperature
+        )
 
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
@@ -131,8 +147,10 @@ class StudentCaduceus(L.LightningModule):
         outputs = self.student(input_ids)
         student_logits = outputs.logits
 
-        # Calculate distillation loss
-        loss = distillation_loss(student_logits, teacher_logits, self.temperature)
+        # Calculate combined loss
+        loss = distillation_loss(
+            student_logits, teacher_logits, input_ids, self.temperature
+        )
 
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
         return loss
