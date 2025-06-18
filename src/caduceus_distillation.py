@@ -35,10 +35,10 @@ def distillation_loss(
     teacher_log_probs = F.log_softmax(teacher_logits / temperature, dim=-1)
     student_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
     # NOTE: re T^2 scaling, from `Distilling the Knowledge in a Neural Network`:
-    # > Since the magnitudes of the gradients p roduced by the soft targets scale as 1/T 2 it is important
-    # > to multiply them by T2 when using both hard and soft targets.  This ensures that the relative contributions
-    # > of the hard and soft targets remain roughly unchanged if the temperature used for distillation is changed
-    # > while experimenting with meta-parameters.
+    # > Since the magnitudes of the gradients produced by the soft targets scale as 1/T 2 it is important
+    # > to multiply them by T^2 when using both hard and soft targets. This ensures that the relative
+    # > contributions of the hard and soft targets remain roughly unchanged if the temperature used for
+    # > distillation is changed while experimenting with meta-parameters.
     # NOTE: `batchmean` is required per pytorch docs: https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.kl_div.html
     soft_loss = F.kl_div(
         student_log_probs, teacher_log_probs, reduction="batchmean", log_target=True
@@ -92,12 +92,14 @@ class StudentCaduceus(L.LightningModule):
     student: AutoModelForMaskedLM
     temperature: float
     lr: float
+    alpha: float
 
     def __init__(
         self,
         teacher_model_name: str = "kuleshov-group/caduceus-ps_seqlen-131k_d_model-256_n_layer-16",
         lr: float = 1e-3,
         temperature: float = 4.0,
+        alpha: float = 0.8,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -123,6 +125,7 @@ class StudentCaduceus(L.LightningModule):
         )
         self.temperature = temperature
         self.lr = lr
+        self.alpha = alpha
 
     def forward(self, input_ids: torch.Tensor) -> Any:
         return self.student(input_ids)
@@ -135,7 +138,7 @@ class StudentCaduceus(L.LightningModule):
 
         # Calculate combined loss
         loss = distillation_loss(
-            student_logits, teacher_logits, input_ids, self.temperature
+            student_logits, teacher_logits, input_ids, self.temperature, self.alpha
         )
 
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
@@ -149,7 +152,7 @@ class StudentCaduceus(L.LightningModule):
 
         # Calculate combined loss
         loss = distillation_loss(
-            student_logits, teacher_logits, input_ids, self.temperature
+            student_logits, teacher_logits, input_ids, self.temperature, self.alpha
         )
 
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
@@ -171,6 +174,12 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument(
         "--temperature", type=float, default=4.0, help="Distillation temperature"
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.8,
+        help="Weight for distillation soft targets loss (1 - alpha for hard targets loss)",
     )
     parser.add_argument(
         "--train_ratio", type=float, default=0.9, help="Train/validation split ratio"
@@ -213,7 +222,7 @@ def main() -> None:
     )
 
     # Initialize model
-    model = StudentCaduceus(lr=args.lr, temperature=args.temperature)
+    model = StudentCaduceus(lr=args.lr, temperature=args.temperature, alpha=args.alpha)
 
     # Setup logger
     logger = WandbLogger(project=args.project_name, name=args.run_name)
