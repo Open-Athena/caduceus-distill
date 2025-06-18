@@ -166,6 +166,7 @@ def main() -> None:
     parser.add_argument(
         "zarr_path", type=str, help="Path to Zarr file with soft labels"
     )
+    parser.add_argument("--max_epoch", type=int, default=1, help="Trainer max epochs")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument(
@@ -229,7 +230,7 @@ def main() -> None:
 
     # Initialize trainer
     trainer = L.Trainer(
-        max_epochs=1,
+        max_epochs=args.max_epoch,
         # NOTE: bf16 is not supported on T4
         precision="bf16-mixed",
         gradient_clip_val=1.0,
