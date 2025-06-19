@@ -5,6 +5,7 @@ import time
 import traceback
 from typing import Any, Literal
 
+import numpy as np
 import torch
 import torch.nn as nn
 import xarray as xr
@@ -214,7 +215,8 @@ def generate_soft_labels(
                     "sample": batch_indices,
                     "sequence": range(input_ids.shape[1]),
                     "vocab": range(logits.shape[-1]),
-                    "chr_name": (["sample"], list(chr_names)),
+                    # NOTE: use U5 encoding because chr name can be either 3 or 4 characters long, e.g. `chr1` or `chr10`
+                    "chr_name": (["sample"], np.asarray(list(chr_names)).astype("<U5")),
                     "start": (["sample"], [int(s) for s in starts]),
                     "end": (["sample"], [int(e) for e in ends]),
                 },
