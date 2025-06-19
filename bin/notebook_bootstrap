@@ -16,7 +16,7 @@ else
 fi
 
 # 3. Define repository details
-REPO_URL="https://github.com/tabtab-labs/caduceus-distill.git"
+REPO_URL="https://github.com/Open-Athena/caduceus-distill.git"
 REPO_DIR="$BASE_DIR/caduceus-distill"
 echo "Repository will be at: $REPO_DIR"
 

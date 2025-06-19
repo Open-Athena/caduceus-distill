@@ -212,8 +212,7 @@ def generate_soft_labels(
                     "sample": batch_indices,
                     "sequence": range(input_ids.shape[1]),
                     "vocab": range(logits.shape[-1]),
-                    # NOTE: use U5 encoding because chr name can be either 3 or 4 characters long, e.g. `chr1` or `chr10`
-                    "chr_name": (["sample"], list(chr_names), {}, {"dtype": "U5"}),
+                    "chr_name": (["sample"], list(chr_names)),
                     "start": (["sample"], [int(s) for s in starts]),
                     "end": (["sample"], [int(e) for e in ends]),
                 },

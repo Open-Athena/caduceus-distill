@@ -13,7 +13,7 @@ BRANCH_NAME = "main" # or "my-feature-branch"
 # ---------------------
 
 print(f"Setting up environment from branch: {BRANCH_NAME}")
-!curl -sSL https://raw.githubusercontent.com/tabtab-labs/caduceus-distill/{BRANCH_NAME}/bin/notebook_bootstrap | bash -s {BRANCH_NAME}
+!curl -sSL https://raw.githubusercontent.com/Open-Athena/caduceus-distill/{BRANCH_NAME}/bin/notebook_bootstrap | bash -s {BRANCH_NAME}
 
 # Change directory into the repo
 BASE_DIR = '/kaggle/working' if 'KAGGLE_KERNEL_RUN_TYPE' in os.environ else '/content'
@@ -32,11 +32,16 @@ Hint: To edit a file in Kaggle, create a new cell in the notebook and run:
 
 Then to run the *inference* code:
 ```
-!uv run src/caduceus_inf.py data/hg38/hg38.ml.fa inf_output
+!uv run src/caduceus_inf.py data/hg38/hg38.ml.fa inf_output --max-batches=10 --chunk-size=65536
 ```
 
 
 Then to run the *distillation* code:
 ```
-!uv run src/caduceus_distillation.py inf_output
+!uv run src/caduceus_distillation.py inf_output --no_wandb
+```
+
+To run the **eval** code:
+```
+!uv run src/caduceus_nt_eval.py
 ```
