@@ -1,0 +1,18 @@
+# Hydra config for `src/caduceus_nt_eval.py`
+limit: 10_000
+chunk_size: 100
+disable_fused_add_norm: true
+random: false
+task_group: representative_binary_tasks
+hydra:
+  run:
+    dir: data/run/${hydra.job.override_dirname}
+  sweep:
+    dir: data/sweep
+    subdir: ${hydra.job.override_dirname}
+  job:
+    config:
+      override_dirname:
+        exclude_keys: [chunk_size]
+        kv_sep: "_"
+        item_sep: "__"

@@ -26,25 +26,6 @@ from transformers import (
 
 logger = logging.getLogger(__name__)
 
-# This is the content of the config loaded below by hydra:
-# limit: 10_000
-# chunk_size: 100
-# disable_fused_add_norm: true
-# random: false
-# task_group: representative_binary_tasks
-# hydra:
-#   run:
-#     dir: data/run/${hydra.job.override_dirname}
-#   sweep:
-#     dir: data/sweep
-#     subdir: ${hydra.job.override_dirname}
-#   job:
-#     config:
-#       override_dirname:
-#         exclude_keys: [chunk_size]
-#         kv_sep: "_"
-#         item_sep: "__"
-
 
 @hydra.main(version_base=None, config_path=".", config_name="config")
 def main(cfg: DictConfig) -> None:
