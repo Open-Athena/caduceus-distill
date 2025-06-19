@@ -1,6 +1,8 @@
 import argparse
 import os
+import sys
 import time
+import traceback
 from typing import Any, Literal
 
 import torch
@@ -275,7 +277,7 @@ def generate_soft_labels(
 
     except Exception as e:
         was_interrupted = True
-        print(f"\nError occurred: {str(e)}")
+        print(f"\n{traceback.format_exc()}\nError occurred: {str(e)}", file=sys.stderr)
 
     finally:
         if nvml_available and pynvml is not None:
