@@ -1,6 +1,7 @@
 import logging
 from importlib.util import find_spec
 from pathlib import Path
+from typing import Any
 
 import hydra
 import numpy as np
@@ -46,12 +47,13 @@ logger = logging.getLogger(__name__)
 
 
 @hydra.main(version_base=None, config_path=".", config_name="config")
-def main(cfg: DictConfig):
+def main(cfg: DictConfig) -> None:
     logging.basicConfig(level=logging.INFO)
     logger.info(f"Running with config: {cfg}")
 
     output_path = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
     features_path = output_path / "features.nc"
+    features: xr.Dataset
 
     if not features_path.exists():
         logger.info(f"Creating features at {features_path}")
@@ -74,7 +76,7 @@ def main(cfg: DictConfig):
 
 def summarize_labels(features: xr.Dataset) -> pd.DataFrame:
     with pd.option_context("display.max_rows", None):
-        labels = features[["task_name", "split", "label"]].to_pandas()
+        labels: pd.DataFrame = features[["task_name", "split", "label"]].to_dataframe()
         logger.info(
             "Label values:\n{df}".format(
                 df=(labels.groupby(["task_name", "split"])["label"].unique())
@@ -83,7 +85,7 @@ def summarize_labels(features: xr.Dataset) -> pd.DataFrame:
         logger.info(
             "Label types:\n{df}".format(
                 df=(
-                    labels.assign(label_type=lambda df: df["label"].apply(type))
+                    labels.assign(label_type=lambda df: df["label"].map(type))
                     .groupby(["task_name", "split"])["label_type"]
                     .value_counts()
                 )
@@ -94,7 +96,11 @@ def summarize_labels(features: xr.Dataset) -> pd.DataFrame:
                 df=(
                     labels.groupby(["task_name", "split"])["label"].pipe(
                         lambda x: pd.concat(
-                            [x.value_counts(normalize=n) for n in [False, True]], axis=1
+                            [
+                                x.value_counts(normalize=False),
+                                x.value_counts(normalize=True),
+                            ],
+                            axis=1,
                         )
                     )
                 )
@@ -104,7 +110,7 @@ def summarize_labels(features: xr.Dataset) -> pd.DataFrame:
     return labels
 
 
-def summarize_performance(results: pd.DataFrame) -> pd.DataFrame:
+def summarize_performance(results: pd.DataFrame) -> None:
     with pd.option_context("display.max_rows", None):
         logger.info(f"Model Performance Metrics:\n{results}")
 
@@ -117,11 +123,12 @@ def load_nt_dataset(task_name: str) -> Dataset:
     # - https://github.com/m42-health/gfm-random-eval/blob/575ceab00f841f2cd7f6e23810508829835871ea/nt_benchmark/ft_datasets.py#L50-L52
     # Note: both the m42 and Caduceus papers use the original dataset (nucleotide_transformer_downstream_tasks)
     # rather than the revised one (nucleotide_transformer_downstream_tasks_revised).
-    return load_dataset(
+    dataset: Any = load_dataset(
         "InstaDeepAI/nucleotide_transformer_downstream_tasks_revised",
         name=task_name,
         trust_remote_code=True,
     )
+    return dataset
 
 
 def load_caduceus(
@@ -182,7 +189,7 @@ TASK_GROUPS = {
 }
 
 
-def create_features(cfg: DictConfig) -> Path:
+def create_features(cfg: DictConfig) -> xr.Dataset:
     datasets = []
     task_names = TASK_GROUPS[cfg.task_group]
     for task_name in tqdm.tqdm(task_names, desc="Loading task datasets"):
