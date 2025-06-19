@@ -266,11 +266,24 @@ def main() -> None:
         save_last=True,
     )
 
+    # Dynamically set precision based on hardware support.
+    precision: Literal["bf16-mixed", "16-mixed", "32-true"]
+    if torch.cuda.is_available() and torch.cuda.is_bf16_supported():  # type: ignore[no-untyped-call]
+        precision = "bf16-mixed"
+        print("INFO: GPU supports bfloat16. Using 'bf16-mixed' precision.")
+    elif torch.cuda.is_available():
+        precision = "16-mixed"
+        print(
+            "INFO: GPU does not support bfloat16. Falling back to '16-mixed' precision."
+        )
+    else:
+        precision = "32-true"
+        print("INFO: No GPU available. Using '32-true' precision on CPU.")
+
     # Initialize trainer
     trainer = L.Trainer(
         max_epochs=args.max_epoch,
-        # NOTE: bf16 is not supported on T4
-        precision="bf16-mixed",
+        precision=precision,
         gradient_clip_val=1.0,
         log_every_n_steps=1,
         logger=logger,
