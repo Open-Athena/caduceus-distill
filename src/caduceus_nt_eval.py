@@ -1,26 +1,27 @@
+import logging
+from importlib.util import find_spec
+from pathlib import Path
+
+import hydra
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import tqdm
+import xarray as xr
+from datasets import Dataset, load_dataset
+from omegaconf import DictConfig
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.linear_model import LogisticRegressionCV
+from sklearn.metrics import accuracy_score, f1_score, matthews_corrcoef, roc_auc_score
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 from transformers import (
     AutoConfig,
     AutoModelForMaskedLM,
     AutoTokenizer,
     PreTrainedTokenizer,
 )
-import pandas as pd
-from datasets import load_dataset, Dataset, DatasetDict
-import torch.nn as nn
-import torch
-import tqdm
-from omegaconf import DictConfig
-import hydra
-from pathlib import Path
-import xarray as xr
-import numpy as np
-import logging
-from importlib.util import find_spec
-from sklearn.linear_model import LogisticRegressionCV
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.metrics import roc_auc_score, matthews_corrcoef, accuracy_score, f1_score
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,7 @@ def summarize_labels(features: xr.Dataset) -> pd.DataFrame:
 
 def summarize_performance(results: pd.DataFrame) -> pd.DataFrame:
     with pd.option_context("display.max_rows", None):
-        logger.info("Model Performance Metrics:\n{df}".format(df=results))
+        logger.info(f"Model Performance Metrics:\n{results}")
 
 
 def load_nt_dataset(task_name: str) -> Dataset:
@@ -220,7 +221,7 @@ def create_modeling_dataset(
         chunks = chunks[:n_chunks]
 
     states = []
-    for i, chunk in tqdm.tqdm(
+    for _, chunk in tqdm.tqdm(
         enumerate(chunks),
         total=len(chunks),
         desc=f"Creating features [dataset={ds.info.config_name}]",
@@ -253,7 +254,7 @@ def run_modeling(features: xr.Dataset, seed: int = 0) -> pd.DataFrame:
     for task_name in tqdm.tqdm(task_names, desc="Running models"):
         logger.info(f"Running models for task {task_name!r}")
 
-        ds = features.pipe(lambda ds: ds.sel(samples=ds.task_name.values == task_name))
+        ds = features.sel(samples=(features.task_name.values == task_name))
         assert ds.sizes["samples"] > 0, f"No samples found for task {task_name!r}"
         if len(task_names) > 1:
             assert ds.sizes["samples"] < features.sizes["samples"]
