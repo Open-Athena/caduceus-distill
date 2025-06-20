@@ -184,7 +184,6 @@ def generate_soft_labels(
             with torch.inference_mode(), autocast(enabled=(device == "cuda")):
                 outputs = model(input_ids)
                 logits = outputs.logits
-                probabilities = torch.softmax(logits.float(), dim=-1)
 
             if nvml_available and pynvml is not None:
                 try:
@@ -206,10 +205,6 @@ def generate_soft_labels(
                 {
                     "input_ids": (["sample", "sequence"], input_ids.cpu().numpy()),
                     "logits": (["sample", "sequence", "vocab"], logits.cpu().numpy()),
-                    "probabilities": (
-                        ["sample", "sequence", "vocab"],
-                        probabilities.cpu().numpy(),
-                    ),
                 },
                 coords={
                     "sample": batch_indices,
