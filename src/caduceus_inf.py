@@ -145,6 +145,8 @@ def generate_soft_labels(
 
     if device == "cuda" and torch.cuda.is_available():
         try:
+            import pynvml  # type: ignore[no-redef]
+
             pynvml.nvmlInit()
             device_count = pynvml.nvmlDeviceGetCount()
             handles = [
