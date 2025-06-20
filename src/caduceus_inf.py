@@ -223,6 +223,10 @@ def generate_soft_labels(
             if os.path.exists(output_path):
                 zarr_kwargs["append_dim"] = "sample"
 
+            # NOTE: use single chunk per batch: https://github.com/pydata/xarray/discussions/6697#discussioncomment-2946370
+            for var in ds.variables:
+                ds[var].encoding["chunks"] = ds[var].shape
+
             ds.to_zarr(output_path, **zarr_kwargs)
 
             current_time: float = time.time()
