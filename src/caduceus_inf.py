@@ -145,6 +145,8 @@ def generate_soft_labels(
 
     if device == "cuda" and torch.cuda.is_available():
         try:
+            import pynvml  # type: ignore[no-redef]
+
             pynvml.nvmlInit()
             device_count = pynvml.nvmlDeviceGetCount()
             handles = [
@@ -220,6 +222,10 @@ def generate_soft_labels(
             zarr_kwargs: dict[str, Any] = {"zarr_format": 2, "consolidated": True}
             if os.path.exists(output_path):
                 zarr_kwargs["append_dim"] = "sample"
+
+            # NOTE: use single chunk per batch: https://github.com/pydata/xarray/discussions/6697#discussioncomment-2946370
+            for var in ds.variables:
+                ds[var].encoding["chunks"] = ds[var].shape
 
             ds.to_zarr(output_path, **zarr_kwargs)
 
