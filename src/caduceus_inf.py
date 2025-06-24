@@ -13,6 +13,7 @@ from pyfaidx import Fasta
 from torch.cuda.amp import autocast
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForMaskedLM, AutoTokenizer, PreTrainedTokenizer
+from upath import UPath
 
 DATASET_ITEM_T = tuple[torch.Tensor, str, int, int]
 
@@ -220,7 +221,7 @@ def generate_soft_labels(
             )
 
             zarr_kwargs: dict[str, Any] = {"zarr_format": 2, "consolidated": True}
-            if os.path.exists(output_path):
+            if UPath(output_path).exists():
                 zarr_kwargs["append_dim"] = "sample"
 
             # NOTE: use single chunk per batch: https://github.com/pydata/xarray/discussions/6697#discussioncomment-2946370
