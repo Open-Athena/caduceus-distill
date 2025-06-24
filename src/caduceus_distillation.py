@@ -75,31 +75,39 @@ EXAMPLE_T = tuple[torch.Tensor, torch.Tensor]
 
 
 class DistillationDataset(Dataset[EXAMPLE_T]):
-    ds: xr.Dataset
-
     def __init__(
         self,
         zarr_path: str,
         split: Literal["train", "valid"] = "train",
         train_ratio: float = 0.9,
     ) -> None:
-        self.ds = xr.open_zarr(zarr_path, chunks=None)
+        self.zarr_path = zarr_path
+        self.split = split
+        self.train_ratio = train_ratio
 
-        # Split data into train/valid
-        total_samples = len(self.ds.sample)
-        train_size = int(total_samples * train_ratio)
+        self.ds: xr.Dataset | None = None
 
-        if split == "train":
-            self.ds = self.ds.isel(sample=slice(0, train_size))
-        elif split == "valid":
-            self.ds = self.ds.isel(sample=slice(train_size, None))
-        else:
-            raise ValueError("split must be 'train' or 'valid'")
+        with xr.open_zarr(self.zarr_path, chunks=None) as temp_ds:
+            total_samples = len(temp_ds.sample)
+            train_size = int(total_samples * self.train_ratio)
+
+            if self.split == "train":
+                self.sample_slice = slice(0, train_size)
+                self._len = train_size
+            elif self.split == "valid":
+                self.sample_slice = slice(train_size, None)
+                self._len = total_samples - train_size
+            else:
+                raise ValueError("split must be 'train' or 'valid'")
 
     def __len__(self) -> int:
-        return len(self.ds.sample)
+        return self._len
 
     def __getitem__(self, idx: int) -> EXAMPLE_T:
+        if self.ds is None:
+            full_ds = xr.open_zarr(self.zarr_path, chunks=None)
+            self.ds = full_ds.isel(sample=self.sample_slice)
+
         sample = self.ds.isel(sample=idx)
         input_ids = torch.tensor(sample.input_ids.values, dtype=torch.long)
         teacher_logits = torch.tensor(sample.logits.values, dtype=torch.float32)
