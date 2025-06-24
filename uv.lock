@@ -162,6 +162,7 @@ dependencies = [
     { name = "setuptools" },
     { name = "torch" },
     { name = "transformers" },
+    { name = "universal-pathlib" },
     { name = "wandb" },
     { name = "xarray" },
     { name = "zarr" },
@@ -200,6 +201,7 @@ requires-dist = [
     { name = "setuptools", specifier = ">=80.9.0" },
     { name = "torch", specifier = "==2.2.0" },
     { name = "transformers", specifier = "==4.38.1" },
+    { name = "universal-pathlib", specifier = ">=0.2.6" },
     { name = "wandb", specifier = ">=0.20.1" },
     { name = "xarray", specifier = ">=2025.6.1" },
     { name = "zarr", specifier = ">=3.0.8" },
@@ -2076,6 +2078,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/95/32/1a225d6164441be760d75c2c42e2780dc0873fe382da3e98a2e1e48361e5/tzdata-2025.2.tar.gz", hash = "sha256:b60a638fcc0daffadf82fe0f57e53d06bdec2f36c4df66280ae79bce6bd6f2b9", size = 196380 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5c/23/c7abc0ca0a1526a0774eca151daeb8de62ec457e77262b66b359c3c7679e/tzdata-2025.2-py2.py3-none-any.whl", hash = "sha256:1a403fada01ff9221ca8044d701868fa132215d84beb92242d9acd2147f667a8", size = 347839 },
+]
+
+[[package]]
+name = "universal-pathlib"
+version = "0.2.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "fsspec" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/eb/21/dd871495af3933e585261adce42678dcdf1168c9d6fa0a8f7b6565e54472/universal_pathlib-0.2.6.tar.gz", hash = "sha256:50817aaeaa9f4163cb1e76f5bdf84207fa05ce728b23fd779479b3462e5430ac", size = 175427 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e5/4d/2e577f6db7aa0f932d19f799c18f604b2b302c65f733419b900ec07dbade/universal_pathlib-0.2.6-py3-none-any.whl", hash = "sha256:700dec2b58ef34b87998513de6d2ae153b22f083197dfafb8544744edabd1b18", size = 50087 },
 ]
 
 [[package]]
