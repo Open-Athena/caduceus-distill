@@ -204,6 +204,12 @@ def main() -> None:
         "zarr_path", type=str, help="Path to Zarr file with soft labels"
     )
     parser.add_argument("--max_epoch", type=int, default=1, help="Trainer max epochs")
+    parser.add_argument(
+        "--max_batches",
+        type=int,
+        default=None,
+        help="Limit batches per epoch (defaults to all)",
+    )
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument(
@@ -298,6 +304,8 @@ def main() -> None:
         callbacks=[checkpoint_callback],
         accelerator="auto",
         devices="auto",
+        limit_train_batches=args.max_batches,
+        limit_val_batches=args.max_batches,
     )
 
     # Train model
