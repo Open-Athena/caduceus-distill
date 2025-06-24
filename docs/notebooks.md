@@ -28,6 +28,27 @@ Hint: To edit a file in Kaggle, create a new cell in the notebook and run:
 <CONTENTS OF YOUR PYTHON SCRIPT>
 ```
 
+## GCloud SDK Auth in Kaggle Notebook
+
+Start by setting up: "Add-ons/Google Cloud SDK" (1 time operations).
+
+As the first cell:
+```
+from kaggle_secrets import UserSecretsClient
+
+# Note: Requires a prior setup of "Add-ons/Google Cloud SDK"
+UserSecretsClient().set_gcloud_credentials(project="caduceus-distill")
+```
+
+To test in the notebook:
+```
+%%sh
+# Test
+gcloud storage ls gs://cadu-distill/
+# Note: `gsutil ls gs://cadu-distill/` will yield the following error:
+# Anonymous caller does not have storage.objects.list access to the Google Cloud Storage bucket. Permission 'storage.objects.list' denied on resource (or it may not exist)
+```
+
 ## Running the code:
 
 Then to run the *inference* code:
