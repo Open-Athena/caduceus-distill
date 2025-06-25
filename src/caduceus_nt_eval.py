@@ -136,6 +136,42 @@ def load_caduceus(
         model = AutoModelForMaskedLM.from_pretrained(
             model_name, config=model_config, trust_remote_code=True
         )
+
+    num_gpus = torch.cuda.device_count()
+    # Sequential warm-up to prevent a race condition in the Triton kernel autotuner.
+    # This is necessary when using nn.DataParallel with models that use Triton JIT,
+    # which is triggered here by `disable_fused_add_norm=True`.
+    if num_gpus > 1 and disable_fused_add_norm:
+        logger.info("Pre-warming Triton cache on all available GPUs sequentially...")
+        warmup_seq_len = 1024  # A representative length to trigger compilation.
+        for i in range(num_gpus):
+            gpu_device = f"cuda:{i}"
+            logger.info(f"  Warming up on {gpu_device}...")
+            try:
+                model.to(gpu_device)
+                dummy_input = torch.randint(
+                    0,
+                    tokenizer.vocab_size,
+                    (1, warmup_seq_len),
+                    dtype=torch.long,
+                    device=gpu_device,
+                )
+                with torch.no_grad():
+                    _ = model(dummy_input)
+                torch.cuda.synchronize(gpu_device)
+                logger.info(f"  Warm-up on {gpu_device} complete.")
+            except Exception as e:
+                logger.warning(
+                    f"  An error occurred during warm-up on {gpu_device}: {e}. "
+                    "Proceeding, but errors may occur."
+                )
+        logger.info("All GPUs warmed up.")
+        # Move model back to CPU before DataParallel wrapper.
+        model.to("cpu")
+
+    if num_gpus > 1:
+        model = nn.DataParallel(model)
+
     model = model.to("cuda")
     return model, tokenizer
 
