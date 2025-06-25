@@ -173,6 +173,10 @@ TASK_GROUPS = {
 def create_features(cfg: DictConfig) -> xr.Dataset:
     datasets = []
     task_names = TASK_GROUPS[cfg.task_group]
+    if cfg.get("task_limit") and cfg.task_limit > 0:
+        logger.info(f"Limiting to {cfg.task_limit} tasks")
+        task_names = task_names[: cfg.task_limit]
+
     for task_name in tqdm.tqdm(task_names, desc="Loading task datasets"):
         logger.info(f"Loading task {task_name}")
         try:
@@ -205,6 +209,7 @@ def create_modeling_dataset(
 ) -> xr.Dataset:
     chunks = torch.split(torch.arange(len(ds)), cfg.chunk_size)
     if cfg.limit:
+        logger.info(f"Limiting to {cfg.limit} samples")
         n_chunks = (cfg.limit + cfg.chunk_size - 1) // cfg.chunk_size
         chunks = chunks[:n_chunks]
 
