@@ -210,13 +210,13 @@ def main() -> None:
         "--max_train_batches",
         type=int,
         default=None,
-        help="Limit train batches (defaults to all)",
+        help="Limit train batches per epoch (defaults to all)",
     )
     parser.add_argument(
         "--max_val_batches",
         type=int,
         default=10,
-        help="Limit 'step' validation batches (defaults to 10).",
+        help="Limit validation batches during training (defaults to 10). Full dataset is used for final validation.",
     )
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
