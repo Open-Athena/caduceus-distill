@@ -1,5 +1,7 @@
 data/
 .local/
+checkpoints/
+wandb/
 
 # Python-generated files
 __pycache__/
