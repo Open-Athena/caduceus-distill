@@ -197,6 +197,8 @@ class StudentCaduceus(L.LightningModule):
 
 
 def main() -> None:
+    L.seed_everything(42, workers=True)
+
     parser = argparse.ArgumentParser(
         description="Distill Caduceus model using soft labels"
     )
@@ -205,10 +207,16 @@ def main() -> None:
     )
     parser.add_argument("--max_epoch", type=int, default=1, help="Trainer max epochs")
     parser.add_argument(
-        "--max_batches",
+        "--max_train_batches",
         type=int,
         default=None,
-        help="Limit batches per epoch (defaults to all)",
+        help="Limit train batches (defaults to all)",
+    )
+    parser.add_argument(
+        "--max_val_batches",
+        type=int,
+        default=10,
+        help="Limit 'step' validation batches (defaults to 10).",
     )
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
@@ -253,13 +261,15 @@ def main() -> None:
         shuffle=True,
         num_workers=args.num_workers,
         persistent_workers=True if args.num_workers > 0 else False,
+        pin_memory=True,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
-        shuffle=False,
+        shuffle=True,
         num_workers=args.num_workers,
         persistent_workers=True if args.num_workers > 0 else False,
+        pin_memory=True,
     )
 
     # Initialize model
@@ -304,12 +314,18 @@ def main() -> None:
         callbacks=[checkpoint_callback],
         accelerator="auto",
         devices="auto",
-        limit_train_batches=args.max_batches,
-        limit_val_batches=args.max_batches,
+        limit_train_batches=args.max_train_batches,
+        # Validation settings
+        val_check_interval=128,
+        check_val_every_n_epoch=1,
+        limit_val_batches=args.max_val_batches,
     )
 
     # Train model
     trainer.fit(model, train_loader, val_loader)
+    # TODO: is there a prettier way to tell the trainer to ignore `limit_val_batches`?
+    trainer.limit_val_batches = 1.0
+    trainer.validate(model, val_loader)
 
 
 if __name__ == "__main__":
