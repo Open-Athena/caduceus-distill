@@ -187,8 +187,12 @@ class StudentCaduceus(L.LightningModule):
             student_logits,
             teacher_logits,
             input_ids,
-            temperature=self.temperature,
-            alpha=self.alpha,
+            # The `temp` hyper-parameter should not affect the eval scoring
+            # Also, temp should be set to 1.0 after the distillation is complete (per Hinton)
+            temperature=1.0,
+            # The `alpha` hyper-parameter should not affect the eval scoring
+            # alpha=1.0 means that we only consider the soft targets
+            alpha=1.0,
         )
 
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
