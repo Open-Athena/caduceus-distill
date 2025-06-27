@@ -28,16 +28,21 @@ Hint: To edit a file in Kaggle, create a new cell in the notebook and run:
 <CONTENTS OF YOUR PYTHON SCRIPT>
 ```
 
-## GCloud SDK Auth in Kaggle Notebook
+## Secrets
 
-Start by setting up: "Add-ons/Google Cloud SDK" (1 time operations).
+Start by setting up
+1. "Add-ons/Google Cloud SDK" (1 time operations).
+2. The `WANDB_API_KEY` secret
 
 As the first cell:
 ```
 from kaggle_secrets import UserSecretsClient
+from os import environ
 
 # Note: Requires a prior setup of "Add-ons/Google Cloud SDK"
-UserSecretsClient().set_gcloud_credentials(project="caduceus-distill")
+user_secrets = UserSecretsClient()
+user_secrets.set_gcloud_credentials(project="caduceus-distill")
+environ["WANDB_API_KEY"] = user_secrets.get_secret("WANDB_API_KEY")
 ```
 
 To test in the notebook:
