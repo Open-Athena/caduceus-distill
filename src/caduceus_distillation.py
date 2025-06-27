@@ -47,13 +47,23 @@ def distillation_loss(
     ), f"Expected teacher_logits to be 3D, got {teacher_logits.ndim}D"
     assert input_ids.ndim == 2, f"Expected input_ids to be 2D, got {input_ids.ndim}D"
 
+    B, T, V = student_logits.shape
+
     # Soft loss (distillation)
     teacher_log_probs = F.log_softmax(teacher_logits / temperature, dim=-1)
     student_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
 
+    # KL divergence with batchmean will reduce by the sum and then divide by the 1st dimension (batch size)
+    # Flatten logits to [B * T, V] to get correct KL divergence.
+    teacher_log_probs_flat = teacher_log_probs.view(B * T, V)
+    student_log_probs_flat = student_log_probs.view(B * T, V)
+
     # NOTE: `batchmean` is required per pytorch docs: https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.kl_div.html
     soft_loss = F.kl_div(
-        student_log_probs, teacher_log_probs, reduction="batchmean", log_target=True
+        student_log_probs_flat,
+        teacher_log_probs_flat,
+        reduction="batchmean",
+        log_target=True,
     )
 
     # NOTE: re T^2 scaling, from `Distilling the Knowledge in a Neural Network`:
@@ -65,7 +75,6 @@ def distillation_loss(
         soft_loss *= temperature**2
 
     # Hard loss (cross-entropy)
-    B, T, V = student_logits.shape
     student_logits_flat = student_logits.view(B * T, V)
     input_ids_flat = input_ids.view(B * T)
     hard_loss = F.cross_entropy(student_logits_flat, input_ids_flat)

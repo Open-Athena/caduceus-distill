@@ -46,7 +46,7 @@ def test_temperature_scaling(basic_inputs):
         torch.argmax(teacher, dim=-1).view(-1),
         # NOTE: match the `batchmean`` behavior of KL divergence, first sum then divide by batch size
         reduction="sum",
-    ) / student.size(0)
+    ) / (student.size(0) * student.size(1))
     assert torch.isclose(loss_low_temp, hard_loss)
 
 
