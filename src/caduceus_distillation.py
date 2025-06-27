@@ -262,6 +262,12 @@ def main() -> None:
         default="",
         help="Optional suffix to append to run name",
     )
+    parser.add_argument(
+        "--accumulate_grad_batches",
+        type=int,
+        default=1,
+        help="Number of batches to accumulate gradients over (default: 1, no accumulation)",
+    )
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
 
     args = parser.parse_args()
@@ -346,6 +352,7 @@ def main() -> None:
         val_check_interval=128,
         check_val_every_n_epoch=1,
         limit_val_batches=args.max_val_batches,
+        accumulate_grad_batches=args.accumulate_grad_batches,
     )
 
     # Train model
