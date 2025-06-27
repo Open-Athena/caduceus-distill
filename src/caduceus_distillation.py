@@ -1,4 +1,5 @@
 import argparse
+import multiprocessing
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -342,4 +343,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Set start method to 'spawn' to prevent fork-safety issues with
+    # multi-threaded libraries (e.g. zarr) in worker processes.
+    multiprocessing.set_start_method("spawn")
     main()
