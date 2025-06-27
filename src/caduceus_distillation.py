@@ -1,4 +1,5 @@
 import argparse
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import lightning as L
@@ -241,7 +242,12 @@ def main() -> None:
         default="caduceus_distill",
         help="W&B project name",
     )
-    parser.add_argument("--run_name", type=str, default=None, help="W&B run name")
+    parser.add_argument(
+        "--run_name_suffix",
+        type=str,
+        default="",
+        help="Optional suffix to append to run name",
+    )
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
 
     args = parser.parse_args()
@@ -278,7 +284,14 @@ def main() -> None:
     # Setup logger
     logger: WandbLogger | None = None
     if not args.no_wandb:
-        logger = WandbLogger(project=args.project_name, name=args.run_name)
+        datetime_str = datetime.now(UTC).strftime("%Y%m%d_%H%M")
+
+        run_name_parts = [datetime_str]
+        if args.run_name_suffix:
+            run_name_parts.append(args.run_name_suffix)
+
+        full_run_name = "_".join(run_name_parts)
+        logger = WandbLogger(project=args.project_name, name=full_run_name)
 
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
