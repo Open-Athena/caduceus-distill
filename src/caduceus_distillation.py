@@ -12,6 +12,23 @@ from lightning.pytorch.loggers import WandbLogger
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoConfig, AutoModelForMaskedLM
 
+# https://github.com/kuleshov-group/caduceus/blob/0060a6d8079b6a040fc55d505e15972a327b70a6/caduceus/tokenization_caduceus.py#L54
+# Special `N` nucleotide token ID used in Caduceus models.
+CADUCEUS_NON_SPECIFIC_NUCLEOTIDE_TOKEN_ID = 11
+
+
+def _filter_non_specific_nucleotides_and_batch(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    input_ids: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    mask = input_ids != CADUCEUS_NON_SPECIFIC_NUCLEOTIDE_TOKEN_ID
+    # 2d mask is goint to flatten
+    student_logits = student_logits[mask]
+    teacher_logits = teacher_logits[mask]
+    input_ids = input_ids[mask]
+    return student_logits, teacher_logits, input_ids
+
 
 def distillation_loss(
     student_logits: torch.Tensor,
@@ -47,21 +64,24 @@ def distillation_loss(
     ), f"Expected teacher_logits to be 3D, got {teacher_logits.ndim}D"
     assert input_ids.ndim == 2, f"Expected input_ids to be 2D, got {input_ids.ndim}D"
 
-    B, T, V = student_logits.shape
+    student_logits, teacher_logits, input_ids = (
+        _filter_non_specific_nucleotides_and_batch(
+            student_logits, teacher_logits, input_ids
+        )
+    )
+
+    assert (
+        input_ids.size(0) > 0
+    ), "Input IDs must not be empty after filtering non-specific nucleotides"
 
     # Soft loss (distillation)
     teacher_log_probs = F.log_softmax(teacher_logits / temperature, dim=-1)
     student_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
 
-    # KL divergence with batchmean will reduce by the sum and then divide by the 1st dimension (batch size)
-    # Flatten logits to [B * T, V] to get correct KL divergence.
-    teacher_log_probs_flat = teacher_log_probs.view(B * T, V)
-    student_log_probs_flat = student_log_probs.view(B * T, V)
-
     # NOTE: `batchmean` is required per pytorch docs: https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.kl_div.html
     soft_loss = F.kl_div(
-        student_log_probs_flat,
-        teacher_log_probs_flat,
+        student_log_probs,
+        teacher_log_probs,
         reduction="batchmean",
         log_target=True,
     )
@@ -75,9 +95,7 @@ def distillation_loss(
         soft_loss *= temperature**2
 
     # Hard loss (cross-entropy)
-    student_logits_flat = student_logits.view(B * T, V)
-    input_ids_flat = input_ids.view(B * T)
-    hard_loss = F.cross_entropy(student_logits_flat, input_ids_flat)
+    hard_loss = F.cross_entropy(student_logits, input_ids)
 
     return alpha * soft_loss + (1 - alpha) * hard_loss
 
