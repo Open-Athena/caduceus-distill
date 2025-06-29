@@ -24,20 +24,20 @@ def basic_inputs():
 
 def test_happy_path(basic_inputs):
     student, teacher, targets = basic_inputs
-    loss = distillation_loss(student, teacher, targets)
+    loss, _, _ = distillation_loss(student, teacher, targets)
     assert torch.isfinite(loss)
     assert loss.shape == ()
 
 
 def test_temperature_scaling(basic_inputs):
     student, teacher, targets = basic_inputs
-    loss1 = distillation_loss(student, teacher, targets, temperature=1.0)
-    loss4 = distillation_loss(student, teacher, targets, temperature=4.0)
+    loss1, _, _ = distillation_loss(student, teacher, targets, temperature=1.0)
+    loss4, _, _ = distillation_loss(student, teacher, targets, temperature=4.0)
     assert not torch.allclose(loss1, loss4)
 
     # NOTE: If temp tends to infinity, softmax should be close to uniform,
     # and with alpha=1.0 (soft target loss only), the loss should be 0
-    loss_high_temp = distillation_loss(
+    loss_high_temp, _, _ = distillation_loss(
         student, teacher, targets, temperature=1e9, alpha=1.0
     )
     assert torch.isclose(loss_high_temp, torch.tensor(0.0))
@@ -45,7 +45,7 @@ def test_temperature_scaling(basic_inputs):
     # NOTE: if temp is very low, softmax should be close to one-hot encoding,
     # and so soft loss will tend to hard loss for scaled logits
     small_temp = 1e-9
-    loss_low_temp = distillation_loss(
+    loss_low_temp, _, _ = distillation_loss(
         student, teacher, targets, temperature=small_temp, alpha=1.0
     )
     hard_loss = F.cross_entropy(

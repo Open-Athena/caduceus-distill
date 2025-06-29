@@ -43,7 +43,7 @@ def distillation_loss(
     *,
     temperature: float = 4.0,
     alpha: float = 0.8,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Calculate combined distillation loss (KL divergence with temperature scaling + cross-entropy with hard targets).
 
@@ -103,7 +103,11 @@ def distillation_loss(
     # Hard loss (cross-entropy)
     hard_loss = F.cross_entropy(student_logits, input_ids)
 
-    return alpha * soft_loss + (1 - alpha) * hard_loss
+    soft_loss_contrib = alpha * soft_loss
+    hard_loss_contrib = (1 - alpha) * hard_loss
+    total_loss = soft_loss_contrib + hard_loss_contrib
+
+    return total_loss, soft_loss_contrib, hard_loss_contrib
 
 
 EXAMPLE_T = tuple[torch.Tensor, torch.Tensor]
@@ -190,7 +194,7 @@ class StudentCaduceus(L.LightningModule):
         student_logits = outputs.logits
 
         # Calculate combined loss
-        loss = distillation_loss(
+        loss, soft_loss, hard_loss = distillation_loss(
             student_logits,
             teacher_logits,
             input_ids,
@@ -198,7 +202,9 @@ class StudentCaduceus(L.LightningModule):
             alpha=self.alpha,
         )
 
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train/loss/total", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train/loss/soft", soft_loss, on_step=True, on_epoch=True)
+        self.log("train/loss/hard", hard_loss, on_step=True, on_epoch=True)
         return loss
 
     def validation_step(self, batch: EXAMPLE_T, batch_idx: int) -> torch.Tensor:
@@ -208,7 +214,7 @@ class StudentCaduceus(L.LightningModule):
         student_logits = outputs.logits
 
         # Calculate combined loss
-        loss = distillation_loss(
+        loss, soft_loss, hard_loss = distillation_loss(
             student_logits,
             teacher_logits,
             input_ids,
@@ -220,7 +226,20 @@ class StudentCaduceus(L.LightningModule):
             alpha=1.0,
         )
 
-        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log(
+            "val/loss/total",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
+        self.log(
+            "val/loss/soft", soft_loss, on_step=False, on_epoch=True, sync_dist=True
+        )
+        self.log(
+            "val/loss/hard", hard_loss, on_step=False, on_epoch=True, sync_dist=True
+        )
         return loss
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
@@ -336,7 +355,7 @@ def main() -> None:
     checkpoint_callback = ModelCheckpoint(
         dirpath="checkpoints/",
         filename="student-caduceus-{epoch:02d}-{val_loss:.2f}",
-        monitor="val_loss",
+        monitor="val/loss/total",
         mode="min",
         save_top_k=3,
         save_last=True,
