@@ -1,4 +1,5 @@
 import argparse
+import logging
 import multiprocessing
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -14,7 +15,11 @@ from transformers import AutoConfig, AutoModelForMaskedLM
 
 # https://github.com/kuleshov-group/caduceus/blob/0060a6d8079b6a040fc55d505e15972a327b70a6/caduceus/tokenization_caduceus.py#L54
 # Special `N` nucleotide token ID used in Caduceus models.
+# TODO: should we just depend on the Caduceus code/package or fetch the tokenizer from HL?
 CADUCEUS_NON_SPECIFIC_NUCLEOTIDE_TOKEN_ID = 11
+CADUCEUS_PAD_TOKEN_ID = 4
+
+logger = logging.getLogger(__name__)
 
 
 def _filter_non_specific_nucleotides_and_batch(
@@ -22,11 +27,16 @@ def _filter_non_specific_nucleotides_and_batch(
     teacher_logits: torch.Tensor,
     input_ids: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    mask = input_ids != CADUCEUS_NON_SPECIFIC_NUCLEOTIDE_TOKEN_ID
-    # 2d mask is goint to flatten
+    mask = input_ids != CADUCEUS_PAD_TOKEN_ID
+    # 2d mask is going to collapses some dimensions
     student_logits = student_logits[mask]
     teacher_logits = teacher_logits[mask]
     input_ids = input_ids[mask]
+
+    assert student_logits.ndim == 2
+    assert teacher_logits.ndim == 2
+    assert input_ids.ndim == 1
+
     return student_logits, teacher_logits, input_ids
 
 
@@ -139,6 +149,19 @@ class DistillationDataset(Dataset[EXAMPLE_T]):
 
         sample = self.ds.isel(sample=idx)
         input_ids = torch.tensor(sample.input_ids.values, dtype=torch.long)
+        # Follow Caduceus https://github.com/kuleshov-group/caduceus/blob/0060a6d8079b6a040fc55d505e15972a327b70a6/src/dataloaders/datasets/hg38_dataset.py#L211-L212
+        # We could ignore CADUCEUS_NON_SPECIFIC_NUCLEOTIDE_TOKEN_ID, but instead we replace it with PAD, so PAD is used as context
+        # just like in the original Caduceus training.
+        input_ids = input_ids.masked_fill_(
+            input_ids == CADUCEUS_NON_SPECIFIC_NUCLEOTIDE_TOKEN_ID,
+            CADUCEUS_PAD_TOKEN_ID,
+        )
+
+        if input_ids.eq(CADUCEUS_PAD_TOKEN_ID).all():
+            logger.debug(f"Skipping sample with only PAD tokens, sample id: {idx}")
+            new_idx = torch.randint(0, len(self), (1,)).item()
+            return self[new_idx]  # type: ignore[index]
+
         teacher_logits = torch.tensor(sample.logits.values, dtype=torch.float32)
         return input_ids, teacher_logits
 

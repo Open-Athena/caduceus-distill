@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from src.caduceus_distillation import (
-    CADUCEUS_NON_SPECIFIC_NUCLEOTIDE_TOKEN_ID,
+    CADUCEUS_PAD_TOKEN_ID,
     _filter_non_specific_nucleotides_and_batch,
     distillation_loss,
 )
@@ -74,9 +74,9 @@ def test_filter_non_specific_nucleotides(basic_inputs):
     # randomly set 10% of the targets to a special token CADUCEUS_NON_SPECIFIC_NUCLEOTIDE_TOKEN_ID
     num_non_specific = int(0.1 * targets.numel())
     non_specific_indices = torch.randperm(targets.numel())[:num_non_specific]
-    targets.view(-1)[non_specific_indices] = CADUCEUS_NON_SPECIFIC_NUCLEOTIDE_TOKEN_ID
+    targets.view(-1)[non_specific_indices] = CADUCEUS_PAD_TOKEN_ID
 
-    assert torch.any(targets == CADUCEUS_NON_SPECIFIC_NUCLEOTIDE_TOKEN_ID)
+    assert torch.any(targets == CADUCEUS_PAD_TOKEN_ID)
 
     assert student.ndim == 3
     assert teacher.ndim == 3
@@ -87,7 +87,7 @@ def test_filter_non_specific_nucleotides(basic_inputs):
     )
 
     # Check that the non-specific nucleotide token is filtered out
-    assert not torch.any(targets == CADUCEUS_NON_SPECIFIC_NUCLEOTIDE_TOKEN_ID)
+    assert not torch.any(targets == CADUCEUS_PAD_TOKEN_ID)
     assert student.ndim == 2
     assert teacher.ndim == 2
     assert targets.ndim == 1
@@ -101,7 +101,7 @@ def test_filter_non_specific_nucleotides_filter_all(basic_inputs):
     student, teacher, targets = basic_inputs
 
     # Set all targets to a non-specific nucleotide token
-    targets.fill_(CADUCEUS_NON_SPECIFIC_NUCLEOTIDE_TOKEN_ID)
+    targets.fill_(CADUCEUS_PAD_TOKEN_ID)
 
     student, teacher, targets = _filter_non_specific_nucleotides_and_batch(
         student, teacher, targets
