@@ -208,29 +208,70 @@ class StudentCaduceus(L.LightningModule):
         return loss
 
     def on_before_optimizer_step(self, optimizer: torch.optim.Optimizer) -> None:
-        if self.global_step % 100 == 0:
-            lr = optimizer.param_groups[0]["lr"]
-            for name, param in self.student.named_parameters():
-                if param.grad is not None:
-                    # L2 Norm of Gradients
-                    grad_norm = param.grad.norm(2)
-                    self.log(
-                        f"diagnostics/train/grad_norm/{name}",
-                        grad_norm,
-                        on_step=True,
-                        on_epoch=False,
+        if self.global_step % 100 != 0:
+            return
+
+        lr = optimizer.param_groups[0]["lr"]
+
+        # Full list of layers available here: https://huggingface.co/kuleshov-group/caduceus-ps_seqlen-131k_d_model-256_n_layer-16?show_file_info=model.safetensors
+        significant_param_suffixes = [
+            # in_proj.weight: This is the input projection matrix (i.e. entry point of the mamba block).
+            "mamba_fwd.in_proj.weight",
+            # out_proj.weight: The output projection matrix (i.e. final transformation within the mixer).
+            "mamba_fwd.out_proj.weight",
+            # x_proj.weight & dt_proj.weight: project the input x to dynamically generate the SSM parameters
+            "mamba_fwd.x_proj.weight",
+            "mamba_fwd.dt_proj.weight",
+            # Forward (mamba_fwd) and reverse (mamba_rev) passes are tracked separately (weights are independent)
+            "mamba_rev.x_proj.weight",
+            "mamba_rev.dt_proj.weight",
+        ]
+
+        for name, param in self.student.named_parameters():
+            if param.grad is None:
+                continue
+
+            is_significant_layer_param = any(
+                name.endswith(suffix) for suffix in significant_param_suffixes
+            )
+            # The first layer of the network
+            is_embedding = "word_embeddings.embedding.weight" in name
+
+            if not (is_significant_layer_param or is_embedding):
+                continue
+
+            grad_norm = param.grad.norm(2)
+            data_std = param.data.std()
+            update_ratio = torch.tensor(
+                0.0, device=param.device
+            )  # Default to 0 if data_std is 0
+            if data_std > 0:
+                update_ratio = lr * param.grad.std() / (data_std + 1e-8)
+
+            # Handle layer-specific parameters for grouped W&B plots
+            if is_significant_layer_param:
+                try:
+                    parts = name.split(".")
+                    layer_idx_pos = parts.index("layers") + 1
+                    layer_idx = int(parts[layer_idx_pos])
+                    clean_param_name = ".".join(parts[layer_idx_pos + 1 :]).replace(
+                        "mixer.submodule.", ""
                     )
 
-                    # Update-to-Data Ratio
-                    data_std = param.data.std()
-                    if data_std > 0:
-                        update_ratio = lr * param.grad.std() / (data_std + 1e-8)
-                        self.log(
-                            f"diagnostics/train/update_ratio/{name}",
-                            update_ratio,
-                            on_step=True,
-                            on_epoch=False,
-                        )
+                    self.log(
+                        f"diagnostics/grad_norm/layers/{layer_idx}/{clean_param_name}",
+                        grad_norm,
+                    )
+                    self.log(
+                        f"diagnostics/update_ratio/layers/{layer_idx}/{clean_param_name}",
+                        update_ratio,
+                    )
+                except (ValueError, IndexError):
+                    continue
+            # Handle other significant, non-layer parameters
+            elif is_embedding:
+                self.log("diagnostics/grad_norm/embeddings", grad_norm)
+                self.log("diagnostics/update_ratio/embeddings", update_ratio)
 
     def validation_step(self, batch: EXAMPLE_T, batch_idx: int) -> torch.Tensor:
         input_ids, teacher_logits = batch
