@@ -207,6 +207,31 @@ class StudentCaduceus(L.LightningModule):
         self.log("train/loss/hard", hard_loss, on_step=True, on_epoch=True)
         return loss
 
+    def on_before_optimizer_step(self, optimizer: torch.optim.Optimizer) -> None:
+        if self.global_step % 100 == 0:
+            lr = optimizer.param_groups[0]["lr"]
+            for name, param in self.student.named_parameters():
+                if param.grad is not None:
+                    # L2 Norm of Gradients
+                    grad_norm = param.grad.norm(2)
+                    self.log(
+                        f"diagnostics/train/grad_norm/{name}",
+                        grad_norm,
+                        on_step=True,
+                        on_epoch=False,
+                    )
+
+                    # Update-to-Data Ratio
+                    data_std = param.data.std()
+                    if data_std > 0:
+                        update_ratio = lr * param.grad.std() / (data_std + 1e-8)
+                        self.log(
+                            f"diagnostics/train/update_ratio/{name}",
+                            update_ratio,
+                            on_step=True,
+                            on_epoch=False,
+                        )
+
     def validation_step(self, batch: EXAMPLE_T, batch_idx: int) -> torch.Tensor:
         input_ids, teacher_logits = batch
 
