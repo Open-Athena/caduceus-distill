@@ -134,6 +134,7 @@ class StudentCaduceus(L.LightningModule):
     temperature: float
     lr: float
     alpha: float
+    grad_check_interval: int
 
     def __init__(
         self,
@@ -141,8 +142,10 @@ class StudentCaduceus(L.LightningModule):
         lr: float = 1e-3,
         temperature: float = 4.0,
         alpha: float = 0.8,
+        grad_check_interval: int = 100,
     ) -> None:
         super().__init__()
+        self.grad_check_interval = grad_check_interval
         self.save_hyperparameters()
 
         # Create student config (half depth and width)
@@ -192,7 +195,7 @@ class StudentCaduceus(L.LightningModule):
         return loss
 
     def on_before_optimizer_step(self, optimizer: torch.optim.Optimizer) -> None:
-        if self.global_step % 100 != 0:
+        if self.global_step % self.grad_check_interval != 0:
             return
 
         lr = optimizer.param_groups[0]["lr"]
@@ -348,6 +351,18 @@ def main() -> None:
         help="Optional suffix to append to run name",
     )
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
+    parser.add_argument(
+        "--val_check_interval",
+        type=int,
+        default=25,
+        help="Steps interval between eval metrics",
+    )
+    parser.add_argument(
+        "--grad_check_interval",
+        type=int,
+        default=100,
+        help="Steps interval between grad metrics",
+    )
 
     args = parser.parse_args()
 
@@ -378,7 +393,12 @@ def main() -> None:
     )
 
     # Initialize model
-    model = StudentCaduceus(lr=args.lr, temperature=args.temperature, alpha=args.alpha)
+    model = StudentCaduceus(
+        lr=args.lr,
+        temperature=args.temperature,
+        alpha=args.alpha,
+        grad_check_interval=args.grad_check_interval,
+    )
 
     # Setup logger
     logger: WandbLogger | None = None
@@ -428,7 +448,7 @@ def main() -> None:
         devices="auto",
         limit_train_batches=args.max_train_batches,
         # Validation settings
-        val_check_interval=128,
+        val_check_interval=args.val_check_interval,
         check_val_every_n_epoch=1,
         limit_val_batches=args.max_val_batches,
     )
