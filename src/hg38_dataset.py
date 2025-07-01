@@ -18,6 +18,9 @@ from transformers import PreTrainedTokenizerBase
 MAX_ALLOWED_LENGTH = 2**20
 
 
+HG38_EXAMPLE_T = tuple[torch.Tensor, str, int, int]  # (input_ids, chr_name, start, end)
+
+
 class FastaInterval:
     """Retrieves sequences from a fasta file given a chromosome and start/end indices."""
 
@@ -58,7 +61,7 @@ class FastaInterval:
         end: int,
         max_length: int,
         i_shift: int,
-    ) -> str:
+    ) -> tuple[str, int, int]:
         """
         max_length passed from dataset, not from init
         """
@@ -86,18 +89,19 @@ class FastaInterval:
 
         seq = str(chromosome[start:end])
 
-        return seq
+        # NOTE: here the start and end may have been adjusted!
+        return seq, start, end
 
 
-class HG38Dataset(torch.utils.data.Dataset[torch.Tensor]):
+class HG38Dataset(torch.utils.data.Dataset[HG38_EXAMPLE_T]):
     """Loop through bed file, retrieve (chr, start, end), query fasta file for sequence."""
 
     def __init__(
         self,
         *,
         split: str,
-        bed_file: str,
-        fasta_file: str,
+        bed_file: str | Path,
+        fasta_file: str | Path,
         max_length: int,
         tokenizer: PreTrainedTokenizerBase,
         pad_max_length: int | None,
@@ -137,14 +141,14 @@ class HG38Dataset(torch.utils.data.Dataset[torch.Tensor]):
     def __len__(self) -> int:
         return len(self.df) * self.shifts
 
-    def __getitem__(self, idx: int) -> torch.Tensor:
+    def __getitem__(self, idx: int) -> HG38_EXAMPLE_T:
         """Returns a sequence of specified len"""
         # sample a random row from df
         row_idx, shift_idx = idx // self.shifts, idx % self.shifts
         row = self.df.iloc[row_idx]
         chr_name, start, end = (row.iloc[0], row.iloc[1], row.iloc[2])
 
-        seq = self.fasta(
+        seq, adjusted_start, adjusted_end = self.fasta(
             chr_name,
             start,
             end,
@@ -175,4 +179,4 @@ class HG38Dataset(torch.utils.data.Dataset[torch.Tensor]):
             seq_tensor,
         )
 
-        return seq_tensor
+        return seq_tensor, chr_name, adjusted_start, adjusted_end
