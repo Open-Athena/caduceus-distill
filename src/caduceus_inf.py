@@ -3,68 +3,28 @@ import os
 import sys
 import time
 import traceback
+from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
 import torch
 import torch.nn as nn
 import xarray as xr
-from pyfaidx import Fasta
 from torch.cuda.amp import autocast
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from transformers import AutoModelForMaskedLM, AutoTokenizer, PreTrainedTokenizer
 from upath import UPath
 
-DATASET_ITEM_T = tuple[torch.Tensor, str, int, int]
-
-
-class FastaDataset(Dataset[DATASET_ITEM_T]):
-    fasta: Fasta
-    chunk_size: int
-    tokenizer: PreTrainedTokenizer
-    chunks: list[tuple[str, int, int]]
-
-    def __init__(
-        self,
-        fasta_file: str | os.PathLike[str],
-        chunk_size: int = 131072,
-        tokenizer: PreTrainedTokenizer | None = None,
-    ) -> None:
-        self.fasta = Fasta(str(fasta_file))
-        self.chunk_size = chunk_size
-        self.tokenizer = tokenizer
-
-        self.chunks = []
-        for chr_name in self.fasta.keys():
-            chr_len = len(self.fasta[chr_name])
-            for start in range(0, chr_len, chunk_size):
-                end = min(start + chunk_size, chr_len)
-                if end - start >= chunk_size // 2:
-                    self.chunks.append((chr_name, start, end))
-
-    def __len__(self) -> int:
-        return len(self.chunks)
-
-    def __getitem__(self, idx: int) -> DATASET_ITEM_T:
-        chr_name, start, end = self.chunks[idx]
-        seq = str(self.fasta[chr_name][start:end])
-
-        if len(seq) < self.chunk_size:
-            seq = seq + "N" * (self.chunk_size - len(seq))
-        else:
-            seq = seq[: self.chunk_size]
-
-        if self.tokenizer is None:
-            raise ValueError("Tokenizer must be provided")
-
-        tokens = self.tokenizer(seq, return_tensors="pt", add_special_tokens=False)
-        assert tokens.input_ids.shape == (1, self.chunk_size)
-        return tokens.input_ids.squeeze(0), chr_name, start, end
+from src.hg38_dataset import HG38_EXAMPLE_T, HG38Dataset
+from src.utils import get_root_path
 
 
 def generate_soft_labels(
-    fasta_file: str | os.PathLike[str],
-    output_path: str | os.PathLike[str],
+    *,
+    bed_file: str | Path,
+    fasta_file: str | Path,
+    output_path: str | Path,
+    split: str,
     chunk_size: int = 131072,
     batch_size: int = 1,
     device: Literal["cuda", "cpu"] = "cuda",
@@ -125,12 +85,17 @@ def generate_soft_labels(
     elif device == "cpu":
         model = model.to(device)
 
-    dataset: FastaDataset = FastaDataset(
-        fasta_file, chunk_size=chunk_size, tokenizer=tokenizer
+    dataset: HG38Dataset = HG38Dataset(
+        split=split,
+        bed_file=bed_file,
+        fasta_file=fasta_file,
+        max_length=chunk_size,
+        tokenizer=tokenizer,
+        pad_max_length=None,
     )
 
     num_workers: int = min(os.cpu_count() or 1, 8)
-    dataloader: DataLoader[DATASET_ITEM_T] = DataLoader(
+    dataloader: DataLoader[HG38_EXAMPLE_T] = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=False,
@@ -306,11 +271,25 @@ def generate_soft_labels(
 
 
 if __name__ == "__main__":
+    default_bed_file = get_root_path().joinpath("data", "hg38", "human-sequences.bed")
+    default_fasta_file = get_root_path().joinpath("data", "hg38", "hg38.ml.fa")
+
     parser = argparse.ArgumentParser(
         description="Generate soft labels from FASTA sequences using Caduceus model"
     )
-    parser.add_argument("fasta_file", type=str, help="Path to FASTA file")
     parser.add_argument("output_path", type=str, help="Output Zarr file path")
+    parser.add_argument(
+        "--fasta_file", type=str, help="Path to FASTA file", default=default_fasta_file
+    )
+    parser.add_argument(
+        "--bed_file", type=str, help="Path to BED file", default=default_bed_file
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        help="hg38 dataset split (i.e., 'train', 'valid', 'test')",
+        default="train",
+    )
     parser.add_argument(
         "--chunk-size",
         type=int,
@@ -347,10 +326,12 @@ if __name__ == "__main__":
             )
 
     generate_soft_labels(
-        args.fasta_file,
-        args.output_path,
-        args.chunk_size,
-        args.batch_size,
-        args.device,
-        args.max_batches,
+        bed_file=args.bed_file,
+        fasta_file=args.fasta_file,
+        output_path=args.output_path,
+        split=args.split,
+        chunk_size=args.chunk_size,
+        batch_size=args.batch_size,
+        device=args.device,
+        max_batches=args.max_batches,
     )

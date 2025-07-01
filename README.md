@@ -18,7 +18,7 @@ uv sync --extra mamba
 ### Execution
 
 ```sh
-uv run src/caduceus_inf.py data/hg38/hg38.ml.fa <OUTPUT_DIR>
+uv run src/caduceus_inf.py <OUTPUT_DIR>
 ```
 
 You can adjust the batch and chunk size via CLI arguments.
