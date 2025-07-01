@@ -13,10 +13,6 @@ from lightning.pytorch.loggers import WandbLogger
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoConfig, AutoModelForMaskedLM
 
-# https://github.com/kuleshov-group/caduceus/blob/0060a6d8079b6a040fc55d505e15972a327b70a6/caduceus/tokenization_caduceus.py#L54
-# Special `N` nucleotide token ID used in Caduceus models.
-# TODO: should we just depend on the Caduceus code/package or fetch the tokenizer from HL?
-CADUCEUS_NON_SPECIFIC_NUCLEOTIDE_TOKEN_ID = 11
 CADUCEUS_PAD_TOKEN_ID = 4
 
 logger = logging.getLogger(__name__)
@@ -117,50 +113,29 @@ class DistillationDataset(Dataset[EXAMPLE_T]):
     def __init__(
         self,
         zarr_path: str,
-        split: Literal["train", "valid"] = "train",
-        train_ratio: float = 0.9,
     ) -> None:
         self.zarr_path = zarr_path
-        self.split = split
-        self.train_ratio = train_ratio
-
         self.ds: xr.Dataset | None = None
 
         with xr.open_zarr(self.zarr_path, chunks=None) as temp_ds:
             total_samples = len(temp_ds.sample)
-            train_size = int(total_samples * self.train_ratio)
 
-            if self.split == "train":
-                self.sample_slice = slice(0, train_size)
-                self._len = train_size
-            elif self.split == "valid":
-                self.sample_slice = slice(train_size, None)
-                self._len = total_samples - train_size
-            else:
-                raise ValueError("split must be 'train' or 'valid'")
+            self._len = total_samples
 
     def __len__(self) -> int:
         return self._len
 
     def __getitem__(self, idx: int) -> EXAMPLE_T:
         if self.ds is None:
-            full_ds = xr.open_zarr(self.zarr_path, chunks=None)
-            self.ds = full_ds.isel(sample=self.sample_slice)
+            self.ds = xr.open_zarr(self.zarr_path, chunks=None)
 
         sample = self.ds.isel(sample=idx)
         input_ids = torch.tensor(sample.input_ids.values, dtype=torch.long)
-        # Follow Caduceus https://github.com/kuleshov-group/caduceus/blob/0060a6d8079b6a040fc55d505e15972a327b70a6/src/dataloaders/datasets/hg38_dataset.py#L211-L212
-        # We could ignore CADUCEUS_NON_SPECIFIC_NUCLEOTIDE_TOKEN_ID, but instead we replace it with PAD, so PAD is used as context
-        # just like in the original Caduceus training.
-        input_ids = input_ids.masked_fill_(
-            input_ids == CADUCEUS_NON_SPECIFIC_NUCLEOTIDE_TOKEN_ID,
-            CADUCEUS_PAD_TOKEN_ID,
-        )
 
         if input_ids.eq(CADUCEUS_PAD_TOKEN_ID).all():
-            logger.debug(f"Skipping sample with only PAD tokens, sample id: {idx}")
-            new_idx = torch.randint(0, len(self), (1,)).item()
-            return self[new_idx]  # type: ignore[index]
+            raise ValueError(
+                f"Sample {idx} contains only PAD tokens. This is not allowed."
+            )
 
         teacher_logits = torch.tensor(sample.logits.values, dtype=torch.float32)
         return input_ids, teacher_logits
@@ -259,7 +234,14 @@ def main() -> None:
         description="Distill Caduceus model using soft labels"
     )
     parser.add_argument(
-        "zarr_path", type=str, help="Path to Zarr file with soft labels"
+        "zarr_path_train",
+        type=str,
+        help="Path to the train split Zarr store with soft labels",
+    )
+    parser.add_argument(
+        "zarr_path_val",
+        type=str,
+        help="Path to the validation split Zarr store with soft labels",
     )
     parser.add_argument("--max_epoch", type=int, default=1, help="Trainer max epochs")
     parser.add_argument(
@@ -314,12 +296,8 @@ def main() -> None:
     args = parser.parse_args()
 
     # Initialize datasets
-    train_dataset = DistillationDataset(
-        args.zarr_path, split="train", train_ratio=args.train_ratio
-    )
-    val_dataset = DistillationDataset(
-        args.zarr_path, split="valid", train_ratio=args.train_ratio
-    )
+    train_dataset = DistillationDataset(args.zarr_path_train)
+    val_dataset = DistillationDataset(args.zarr_path_val)
 
     # Create data loaders
     train_loader = DataLoader(
