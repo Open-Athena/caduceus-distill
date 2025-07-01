@@ -15,82 +15,11 @@ import torch
 from pyfaidx import Fasta
 from transformers import PreTrainedTokenizerBase
 
-MAX_ALLOWED_LENGTH = 2**20
+# NOTE: this is the sequence length of the Basenji segments
+MAX_ALLOWED_LENGTH = 2**17
 
 
 HG38_EXAMPLE_T = tuple[torch.Tensor, str, int, int]  # (input_ids, chr_name, start, end)
-
-
-class FastaInterval:
-    """Retrieves sequences from a fasta file given a chromosome and start/end indices."""
-
-    def __init__(
-        self,
-        *,
-        fasta_file: str | Path,
-    ):
-        fasta_file = Path(fasta_file)
-        assert fasta_file.exists(), "Path to fasta file must exist!"
-
-        self.seqs = Fasta(str(fasta_file))
-
-        # calc len of each chromosome in fasta file, store in dict
-        self.chr_lens = {}
-
-        for chr_name in self.seqs.keys():
-            self.chr_lens[chr_name] = len(self.seqs[chr_name])
-
-    @staticmethod
-    def _compute_interval(
-        start: int, end: int, max_length: int, i_shift: int
-    ) -> tuple[int, int]:
-        if max_length == MAX_ALLOWED_LENGTH:
-            return start, end
-        if max_length < MAX_ALLOWED_LENGTH:
-            assert MAX_ALLOWED_LENGTH % max_length == 0
-            return start + i_shift * max_length, start + (i_shift + 1) * max_length
-        else:
-            raise ValueError(
-                f"`max_length` {max_length} (> 2^{int(math.log(MAX_ALLOWED_LENGTH, 2))}) is too large!"
-            )
-
-    def __call__(
-        self,
-        chr_name: str,
-        start: int,
-        end: int,
-        max_length: int,
-        i_shift: int,
-    ) -> tuple[str, int, int]:
-        """
-        max_length passed from dataset, not from init
-        """
-        chromosome = self.seqs[chr_name]
-        chromosome_length = self.chr_lens[chr_name]
-
-        start, end = self._compute_interval(start, end, max_length, i_shift)
-
-        if end > chromosome_length:
-            # Shift interval down
-            start = start - (end - chromosome_length)
-            end = chromosome_length
-            assert start == chromosome_length - max_length
-
-        if start < 0:
-            # Shift interval up
-            end = end - start
-            start = 0
-            assert end == max_length
-
-        if end > chromosome_length:
-            # This may occur if start + MAX_ALLOWED_LENGTH extends beyond the end of the chromosome
-            start = chromosome_length - max_length
-            end = chromosome_length
-
-        seq = str(chromosome[start:end])
-
-        # NOTE: here the start and end may have been adjusted!
-        return seq, start, end
 
 
 class HG38Dataset(torch.utils.data.Dataset[HG38_EXAMPLE_T]):
@@ -102,71 +31,90 @@ class HG38Dataset(torch.utils.data.Dataset[HG38_EXAMPLE_T]):
         split: str,
         bed_file: str | Path,
         fasta_file: str | Path,
-        max_length: int,
+        seq_length: int,
         tokenizer: PreTrainedTokenizerBase,
-        pad_max_length: int | None,
     ):
-        self.max_length = max_length
-        self.pad_max_length = (
-            pad_max_length if pad_max_length is not None else max_length
-        )
+        self.max_length = seq_length
         self.tokenizer = tokenizer
 
-        if max_length <= MAX_ALLOWED_LENGTH:
+        if seq_length <= MAX_ALLOWED_LENGTH:
             assert (
-                MAX_ALLOWED_LENGTH % max_length == 0
-            ), "`max_length` must be a power of 2!"
-            self.shifts = MAX_ALLOWED_LENGTH // max_length
+                MAX_ALLOWED_LENGTH % seq_length == 0
+            ), "`max_length` must be a divisor of MAX_ALLOWED_LENGTH/2^17"
+            self.n_tiles = MAX_ALLOWED_LENGTH // seq_length
         else:
             raise ValueError(
-                f"`max_length` {max_length} (> 2^{int(math.log(MAX_ALLOWED_LENGTH, 2))}) is too large!"
+                f"`max_length` {seq_length} (> 2^{int(math.log(MAX_ALLOWED_LENGTH, 2))}) is too large!"
             )
 
         bed_path = Path(bed_file)
         assert bed_path.exists(), "Path to .bed file must exist!"
-
-        # read bed file
         df_raw = pd.read_csv(
             str(bed_path), sep="\t", names=["chr_name", "start", "end", "split"]
         )
-        # select only split df
-        self.df = df_raw[df_raw["split"] == split]
-        # Update end points so that sequences are all length == MAX_ALLOWED_LENGTH
-        self.df.loc[:, "end"] = self.df["start"] + MAX_ALLOWED_LENGTH
 
-        self.fasta = FastaInterval(
-            fasta_file=fasta_file,
-        )
+        fasta_file = Path(fasta_file)
+        assert (
+            fasta_file.exists()
+        ), f"Path to fasta file must exist! Given: {fasta_file}"
+
+        self.fasta = Fasta(str(fasta_file))
+        self.df = df_raw[df_raw["split"] == split]
+        assert not self.df.empty, f"No data found for split '{split}' in {bed_file}"
+
+        # calc len of each chromosome in fasta file, store in dict
+        self.chr_lens = {}
+        for chr_name in self.fasta.keys():
+            self.chr_lens[chr_name] = len(self.fasta[chr_name])
 
     def __len__(self) -> int:
-        return len(self.df) * self.shifts
+        return len(self.df) * self.n_tiles
 
     def __getitem__(self, idx: int) -> HG38_EXAMPLE_T:
         """Returns a sequence of specified len"""
         # sample a random row from df
-        row_idx, shift_idx = idx // self.shifts, idx % self.shifts
+        row_idx, tile_idx = idx // self.n_tiles, idx % self.n_tiles
         row = self.df.iloc[row_idx]
         chr_name, start, end = (row.iloc[0], row.iloc[1], row.iloc[2])
 
-        seq, adjusted_start, adjusted_end = self.fasta(
-            chr_name,
-            start,
-            end,
-            max_length=self.max_length,
-            i_shift=shift_idx,
+        assert (
+            end - start == MAX_ALLOWED_LENGTH
+        ), f"Expected {MAX_ALLOWED_LENGTH} length sequence, got {end - start}"
+
+        chromosome = self.fasta[chr_name]
+        adjusted_start, adjusted_end = (
+            start + tile_idx * self.max_length,
+            start + (tile_idx + 1) * self.max_length,
         )
-        if end - start != MAX_ALLOWED_LENGTH:
-            print(row, "\nLength: ", end - start)
+        seq = str(chromosome[adjusted_start:adjusted_end])
+
+        assert (
+            adjusted_end <= end
+        ), f"Adjusted end {adjusted_end} exceeds original end {end} for chromosome {chr_name}"
+        assert (
+            adjusted_start >= start
+        ), f"Adjusted start {adjusted_start} is less than original start {start} for chromosome {chr_name}"
+        assert (
+            adjusted_start >= 0
+        ), f"Adjusted start {adjusted_start} is negative for chromosome {chr_name}"
+        assert adjusted_end <= self.chr_lens[chr_name], (
+            f"Adjusted end {adjusted_end} exceeds length of chromosome {chr_name} "
+            f"({self.chr_lens[chr_name]})"
+        )
 
         seq = self.tokenizer(
             seq,
             padding="max_length",
-            max_length=self.pad_max_length,
+            max_length=self.max_length,
             truncation=True,
             add_special_tokens=False,
         )
 
-        seq = seq["input_ids"]  # get input_ids
+        seq = seq["input_ids"]
+
+        assert (
+            len(seq) == self.max_length
+        ), f"Expected {self.max_length} length sequence, got {len(seq)}. {chr_name=}, {adjusted_start=}, {adjusted_end=}, {tile_idx=}"
 
         # convert to tensor
         seq_tensor: torch.Tensor = torch.LongTensor(seq)

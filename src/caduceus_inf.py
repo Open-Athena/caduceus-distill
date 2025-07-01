@@ -25,7 +25,7 @@ def generate_soft_labels(
     fasta_file: str | Path,
     output_path: str | Path,
     split: str,
-    chunk_size: int = 131072,
+    seq_length: int = 2**17,
     batch_size: int = 1,
     device: Literal["cuda", "cpu"] = "cuda",
     max_batches: int | None = None,
@@ -57,7 +57,7 @@ def generate_soft_labels(
                     dummy_input = torch.randint(
                         0,
                         tokenizer.vocab_size,
-                        (1, chunk_size),
+                        (1, seq_length),
                         dtype=torch.long,
                         device=gpu_device,
                     )
@@ -89,9 +89,8 @@ def generate_soft_labels(
         split=split,
         bed_file=bed_file,
         fasta_file=fasta_file,
-        max_length=chunk_size,
+        seq_length=seq_length,
         tokenizer=tokenizer,
-        pad_max_length=None,
     )
 
     num_workers: int = min(os.cpu_count() or 1, 8)
@@ -291,10 +290,10 @@ if __name__ == "__main__":
         default="train",
     )
     parser.add_argument(
-        "--chunk-size",
+        "--seq-length",
         type=int,
-        default=131072,
-        help="Chunk size for sequences (default: 131072)",
+        default=2**17,
+        help=f"Chunk size for sequences (default: {2**17})",
     )
     parser.add_argument(
         "--batch-size", type=int, default=4, help="Batch size (default: 4)"
@@ -330,7 +329,7 @@ if __name__ == "__main__":
         fasta_file=args.fasta_file,
         output_path=args.output_path,
         split=args.split,
-        chunk_size=args.chunk_size,
+        seq_length=args.seq_length,
         batch_size=args.batch_size,
         device=args.device,
         max_batches=args.max_batches,
