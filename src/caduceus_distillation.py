@@ -206,8 +206,14 @@ class StudentCaduceus(L.LightningModule):
         )
 
         self.log("train/loss/total", loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train/loss/soft", soft_loss, on_step=True, on_epoch=True)
-        self.log("train/loss/hard", hard_loss, on_step=True, on_epoch=True)
+        self.log_dict(
+            {
+                "train/loss/soft": soft_loss,
+                "train/loss/hard": hard_loss,
+            },
+            on_step=True,
+            on_epoch=True,
+        )
         return loss
 
     def on_before_optimizer_step(self, optimizer: torch.optim.Optimizer) -> None:
@@ -234,24 +240,13 @@ class StudentCaduceus(L.LightningModule):
             if param.grad is None:
                 continue
 
+            metric_prefix = None
             is_significant_layer_param = any(
                 name.endswith(suffix) for suffix in significant_param_suffixes
             )
             # The first layer of the network
             is_embedding = "word_embeddings.embedding.weight" in name
 
-            if not (is_significant_layer_param or is_embedding):
-                continue
-
-            grad_norm = param.grad.norm(2)
-            data_std = param.data.std()
-            update_ratio = torch.tensor(
-                0.0, device=param.device
-            )  # Default to 0 if data_std is 0
-            if data_std > 0:
-                update_ratio = lr * param.grad.std() / (data_std + 1e-8)
-
-            # Handle layer-specific parameters for grouped W&B plots
             if is_significant_layer_param:
                 try:
                     parts = name.split(".")
@@ -260,21 +255,27 @@ class StudentCaduceus(L.LightningModule):
                     clean_param_name = ".".join(parts[layer_idx_pos + 1 :]).replace(
                         "mixer.submodule.", ""
                     )
-
-                    self.log(
-                        f"diagnostics/grad_norm/layers/{layer_idx}/{clean_param_name}",
-                        grad_norm,
-                    )
-                    self.log(
-                        f"diagnostics/update_ratio/layers/{layer_idx}/{clean_param_name}",
-                        update_ratio,
-                    )
+                    metric_prefix = f"diag/L{layer_idx}/{clean_param_name}"
                 except (ValueError, IndexError):
                     continue
-            # Handle other significant, non-layer parameters
             elif is_embedding:
-                self.log("diagnostics/grad_norm/embeddings", grad_norm)
-                self.log("diagnostics/update_ratio/embeddings", update_ratio)
+                metric_prefix = "diag/embed"
+
+            if metric_prefix:
+                grad_norm = param.grad.norm(2)
+                data_std = param.data.std()
+                update_ratio = torch.tensor(
+                    0.0, device=param.device
+                )  # Default to 0 if data_std is 0
+                if data_std > 0:
+                    update_ratio = lr * param.grad.std() / (data_std + 1e-8)
+
+                self.log_dict(
+                    {
+                        f"{metric_prefix}/grad_norm": grad_norm,
+                        f"{metric_prefix}/update_ratio": update_ratio,
+                    }
+                )
 
     def validation_step(self, batch: EXAMPLE_T, batch_idx: int) -> torch.Tensor:
         input_ids, teacher_logits = batch
@@ -295,19 +296,25 @@ class StudentCaduceus(L.LightningModule):
             alpha=1.0,
         )
 
+        # Use a different metric prefix for the final, post-fit validation run.
+        prefix = "final_val" if self.trainer.state.stage == "validate" else "val"
+
         self.log(
-            "val/loss/total",
+            f"{prefix}/loss/total",
             loss,
             on_step=False,
             on_epoch=True,
             prog_bar=True,
             sync_dist=True,
         )
-        self.log(
-            "val/loss/soft", soft_loss, on_step=False, on_epoch=True, sync_dist=True
-        )
-        self.log(
-            "val/loss/hard", hard_loss, on_step=False, on_epoch=True, sync_dist=True
+        self.log_dict(
+            {
+                f"{prefix}/loss/soft": soft_loss,
+                f"{prefix}/loss/hard": hard_loss,
+            },
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
         )
         return loss
 
