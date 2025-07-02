@@ -283,8 +283,7 @@ class StudentCaduceus(L.LightningModule):
         outputs = self.student(input_ids)
         student_logits = outputs.logits
 
-        # Calculate combined loss
-        loss, soft_loss, hard_loss = distillation_loss(
+        loss_eval, soft_loss_eval, hard_loss_eval = distillation_loss(
             student_logits,
             teacher_logits,
             input_ids,
@@ -296,27 +295,40 @@ class StudentCaduceus(L.LightningModule):
             alpha=1.0,
         )
 
+        # Evaluation loss with training hyperparameters for comparison
+        (
+            loss_train_temp,
+            soft_loss_train_temp,
+            hard_loss_train_temp,
+        ) = distillation_loss(
+            student_logits,
+            teacher_logits,
+            input_ids,
+            temperature=self.temperature,
+            alpha=self.alpha,
+        )
+
         # Use a different metric prefix for the final, post-fit validation run.
-        prefix = "final_val" if self.trainer.state.stage == "validate" else "val"
+        prefix = "val" if self.trainer.state.status != "finished" else "final_val"
 
         self.log(
             f"{prefix}/loss/total",
-            loss,
+            loss_eval,
             on_step=False,
             on_epoch=True,
             prog_bar=True,
             sync_dist=True,
         )
-        self.log_dict(
-            {
-                f"{prefix}/loss/soft": soft_loss,
-                f"{prefix}/loss/hard": hard_loss,
-            },
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-        )
-        return loss
+
+        metrics_to_log = {
+            f"{prefix}/loss/soft": soft_loss_eval,
+            f"{prefix}/loss/hard": hard_loss_eval,
+            f"{prefix}/loss_train_temp/total": loss_train_temp,
+            f"{prefix}/loss_train_temp/soft": soft_loss_train_temp,
+            f"{prefix}/loss_train_temp/hard": hard_loss_train_temp,
+        }
+        self.log_dict(metrics_to_log, on_step=False, on_epoch=True, sync_dist=True)
+        return loss_eval
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
         return torch.optim.AdamW(self.parameters(), lr=self.lr)
