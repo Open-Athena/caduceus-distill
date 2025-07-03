@@ -179,19 +179,24 @@ def load_caduceus(
 TASK_GROUPS = {
     # Tasks from https://huggingface.co/datasets/InstaDeepAI/nucleotide_transformer_downstream_tasks_revised
     "enhancers_only": ["enhancers"],
+    "eric_relevant": [
+        "splice_sites_acceptors",
+        "splice_sites_donors",
+    ],
     "representative_binary_tasks": [
+        "splice_sites_acceptors",
+        "splice_sites_donors",
         "enhancers",
         "promoter_all",
-        "splice_sites_acceptors",
         "H3K4me3",
     ],
     "all_binary_tasks": [
+        "splice_sites_acceptors",
+        "splice_sites_donors",
         "promoter_all",
         "promoter_tata",
         "promoter_no_tata",
         "enhancers",
-        "splice_sites_acceptors",
-        "splice_sites_donors",
         "H2AFZ",
         "H3K27ac",
         "H3K27me3",
