@@ -105,9 +105,14 @@ def load_nt_dataset(task_name: str) -> Dataset:
     # Note: both the m42 and Caduceus papers use the original dataset (nucleotide_transformer_downstream_tasks)
     # rather than the revised one (nucleotide_transformer_downstream_tasks_revised).
     dataset: Any = load_dataset(
-        "InstaDeepAI/nucleotide_transformer_downstream_tasks_revised",
+        # NOTE: use the original dataset rather than the revised one, per Eric comment in https://gist.github.com/eric-czech/7a368d2b2503b726a91510787f4fc373#file-caduceus_nt_eval_example-py
+        # > The Caduceus paper used the original benchmark at InstaDeepAI/nucleotide_transformer_downstream_tasks, so I would suggest start with that instead
+        "InstaDeepAI/nucleotide_transformer_downstream_tasks",
         name=task_name,
         trust_remote_code=True,
+        # NOTE: commit 3 days ago https://huggingface.co/datasets/InstaDeepAI/nucleotide_transformer_downstream_tasks/commit/e8674d5c5940d2247cc16c5c589b2aec78c0cf94
+        # broken reading specific task datasets, so we point at the previous commit from Sep 16, 2024
+        revision="bba8d846099e57fa5ef0556c27055491550e8aeb",
     )
     return dataset
 
@@ -235,8 +240,8 @@ def create_features(cfg: DictConfig) -> xr.Dataset:
                     task_name=(("samples", [task_name] * ds.sizes["samples"])),
                 )
                 datasets.append(ds)
-        except Exception as e:
-            logger.error(f"Failed to create features for task {task_name}: {e}")
+        except Exception:
+            logger.exception(f"Failed to create features for task {task_name}")
     features = xr.concat(datasets, dim="samples")
     features = features.assign_attrs({"num_labels": num_labels})
     return features
