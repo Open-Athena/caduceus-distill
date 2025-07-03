@@ -508,6 +508,24 @@ def main() -> None:
         limit_test_batches=args.max_final_val_batches,
         accumulate_grad_batches=args.accumulate_grad_batches,
     )
+    if logger is not None:
+        logger.log_hyperparams(
+            {
+                "batch_size": args.batch_size,
+                "accumulate_grad_batches": args.accumulate_grad_batches,
+                "learning_rate": args.lr,
+                "temperature": args.temperature,
+                "alpha": args.alpha,
+                "max_epochs": args.max_epoch,
+                "max_train_batches": args.max_train_batches,
+                "max_val_batches": args.max_val_batches,
+                "max_final_val_batches": args.max_final_val_batches,
+                "num_workers": args.num_workers,
+                "val_check_interval": args.val_check_interval,
+                "grad_check_interval": args.grad_check_interval,
+                "precision": precision,
+            }
+        )
 
     # Train model
     trainer.fit(model, train_loader, val_loader)
