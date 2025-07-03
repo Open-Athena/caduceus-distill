@@ -24,6 +24,9 @@ from transformers import (
     PreTrainedTokenizer,
 )
 
+from src.caduceus_distillation import StudentCaduceus
+from src.utils import get_root_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -118,12 +121,13 @@ def load_nt_dataset(task_name: str) -> Dataset:
 
 
 def load_caduceus(
-    num_labels: int, random: bool, disable_fused_add_norm: bool = True
+    *, num_labels: int, model_to_load: str, disable_fused_add_norm: bool = True
 ) -> tuple[nn.Module, PreTrainedTokenizer]:  # noqa
     # See https://github.com/m42-health/gfm-random-eval/blob/575ceab00f841f2cd7f6e23810508829835871ea/nt_benchmark/models.py#L55
     model_name = "kuleshov-group/caduceus-ps_seqlen-131k_d_model-256_n_layer-16"
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    # TODO (rav): what is the purpose of this attribute, I don't think this has any impact
     model_config.num_labels = num_labels
     # This is a modification from the paper to see what happens if this option is NOT overridden;
     # critically, it changes the graph and does not use all pre-trained weights.  Here is the warning
@@ -135,11 +139,15 @@ def load_caduceus(
     # > You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
     if disable_fused_add_norm:
         model_config.fused_add_norm = False
-    if random:
+    if model_to_load == "random":
         model = AutoModelForMaskedLM.from_config(model_config, trust_remote_code=True)
-    else:
+    elif model_to_load == "teacher":
         model = AutoModelForMaskedLM.from_pretrained(
             model_name, config=model_config, trust_remote_code=True
+        )
+    else:
+        model = StudentCaduceus.load_from_checkpoint(
+            get_root_path().joinpath("checkpoints") / model_to_load,
         )
 
     num_gpus = torch.cuda.device_count()
@@ -230,7 +238,7 @@ def create_features(cfg: DictConfig) -> xr.Dataset:
             num_labels = len(set(dataset["train"]["label"]))
             model, tokenizer = load_caduceus(
                 num_labels=num_labels,
-                random=cfg.random,
+                model_to_load=cfg.model_to_load,
                 disable_fused_add_norm=cfg.disable_fused_add_norm,
             )
             for split in ["train", "test"]:
