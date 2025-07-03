@@ -5,6 +5,7 @@ chunk_size: 100
 disable_fused_add_norm: true
 model_to_load: "random"
 task_group: eric_relevant
+experiment_name: "results"
 hydra:
   run:
     dir: data/run/${hydra.job.override_dirname}
