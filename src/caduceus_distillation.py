@@ -8,7 +8,7 @@ import lightning as L
 import torch
 import torch.nn.functional as F
 import xarray as xr
-from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities.types import (
     Optimizer,
@@ -352,7 +352,7 @@ class StudentCaduceus(L.LightningModule):
     ) -> Optimizer | OptimizerLRSchedulerConfig:
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
         if self.cosine_anneal:
-            assert isinstance(self.trainer.limit_train_batches, int)
+            assert isinstance(self.trainer.estimated_stepping_batches, int)
             return {
                 "optimizer": optimizer,
                 "lr_scheduler": {
@@ -499,6 +499,7 @@ def main() -> None:
         save_top_k=3,
         save_last=True,
     )
+    lr_monitor = LearningRateMonitor(logging_interval="step")
 
     # Dynamically set precision based on hardware support.
     precision: Literal["bf16-mixed", "16-mixed", "32-true"]
@@ -521,7 +522,7 @@ def main() -> None:
         gradient_clip_val=1.0,
         log_every_n_steps=1,
         logger=logger,
-        callbacks=[checkpoint_callback],
+        callbacks=[checkpoint_callback, lr_monitor],
         accelerator="auto",
         devices="auto",
         limit_train_batches=args.max_train_batches,
@@ -548,6 +549,7 @@ def main() -> None:
                 "val_check_interval": args.val_check_interval,
                 "grad_check_interval": args.grad_check_interval,
                 "precision": precision,
+                "cosine_anneal": args.cosine_anneal,
             }
         )
 
