@@ -277,7 +277,12 @@ class StudentCaduceus(L.LightningModule):
                     }
                 )
 
-    def validation_step(self, batch: EXAMPLE_T, batch_idx: int) -> torch.Tensor:
+    def _base_validation_step(
+        self,
+        batch: EXAMPLE_T,
+        batch_idx: int,
+        is_final_val: bool,
+    ) -> torch.Tensor:
         input_ids, teacher_logits = batch
 
         outputs = self.student(input_ids)
@@ -309,15 +314,10 @@ class StudentCaduceus(L.LightningModule):
         )
 
         # Use a different metric prefix for the final, post-fit validation run.
-        prefix = "val" if self.trainer.state.status != "finished" else "final_val"
+        prefix = "val" if not is_final_val else "final_val"
 
         self.log(
-            f"{prefix}/loss/total",
-            loss_eval,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
+            f"{prefix}/loss/total", loss_eval, prog_bar=not is_final_val, sync_dist=True
         )
 
         metrics_to_log = {
@@ -327,8 +327,18 @@ class StudentCaduceus(L.LightningModule):
             f"{prefix}/loss_train_temp/soft": soft_loss_train_temp,
             f"{prefix}/loss_train_temp/hard": hard_loss_train_temp,
         }
-        self.log_dict(metrics_to_log, on_step=False, on_epoch=True, sync_dist=True)
+        self.log_dict(metrics_to_log, sync_dist=True)
         return loss_eval
+
+    def validation_step(self, batch: EXAMPLE_T, batch_idx: int) -> torch.Tensor:
+        return self._base_validation_step(batch, batch_idx, is_final_val=False)
+
+    def test_step(self, batch: EXAMPLE_T, batch_idx: int) -> torch.Tensor:
+        """
+        Test step is used for final validation after training.
+        It uses the same logic as validation_step but with final_val prefix.
+        """
+        return self._base_validation_step(batch, batch_idx, is_final_val=True)
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
         return torch.optim.AdamW(self.parameters(), lr=self.lr)
@@ -408,7 +418,7 @@ def main() -> None:
     parser.add_argument(
         "--val_check_interval",
         type=int,
-        default=25,
+        default=50,
         help="Steps interval between eval metrics",
     )
     parser.add_argument(
@@ -425,20 +435,16 @@ def main() -> None:
     val_dataset = DistillationDataset(args.zarr_path_val)
 
     # Create data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        persistent_workers=True if args.num_workers > 0 else False,
-        pin_memory=True,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        persistent_workers=True if args.num_workers > 0 else False,
-        pin_memory=True,
-    )
+    train_loader, val_loader, test_loader = [
+        DataLoader(
+            ds,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            persistent_workers=True if args.num_workers > 0 else False,
+            pin_memory=True,
+        )
+        for ds in [train_dataset, val_dataset, val_dataset]
+    ]
 
     # Initialize model
     model = StudentCaduceus(
@@ -499,13 +505,13 @@ def main() -> None:
         val_check_interval=args.val_check_interval,
         check_val_every_n_epoch=1,
         limit_val_batches=args.max_val_batches,
+        limit_test_batches=args.max_final_val_batches,
         accumulate_grad_batches=args.accumulate_grad_batches,
     )
 
     # Train model
     trainer.fit(model, train_loader, val_loader)
-    trainer.limit_val_batches = args.max_final_val_batches
-    trainer.validate(model, val_loader)
+    trainer.test(model, test_loader)
 
 
 if __name__ == "__main__":
