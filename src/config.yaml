@@ -2,7 +2,7 @@
 limit: 10_000
 task_limit: null
 chunk_size: 100
-disable_fused_add_norm: true
+disable_fused_add_norm: false
 model_to_load: "random"
 task_group: eric_relevant
 hydra:
