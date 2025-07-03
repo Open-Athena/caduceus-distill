@@ -428,7 +428,6 @@ def main() -> None:
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
         num_workers=args.num_workers,
         persistent_workers=True if args.num_workers > 0 else False,
         pin_memory=True,
@@ -436,7 +435,6 @@ def main() -> None:
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
         num_workers=args.num_workers,
         persistent_workers=True if args.num_workers > 0 else False,
         pin_memory=True,
