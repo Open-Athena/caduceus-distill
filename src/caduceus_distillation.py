@@ -361,7 +361,13 @@ def main() -> None:
         "--max_val_batches",
         type=int,
         default=10,
-        help="Limit validation batches during training (defaults to 10). Full dataset is used for final validation.",
+        help="Limit validation batches during training (defaults to 10)",
+    )
+    parser.add_argument(
+        "--max_final_val_batches",
+        type=int,
+        default=1000,
+        help="Limit final validation batches (defaults to 1000).",
     )
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
@@ -500,8 +506,7 @@ def main() -> None:
 
     # Train model
     trainer.fit(model, train_loader, val_loader)
-    # TODO: is there a prettier way to tell the trainer to ignore `limit_val_batches`?
-    trainer.limit_val_batches = 1.0
+    trainer.limit_val_batches = args.max_final_val_batches
     trainer.validate(model, val_loader)
 
 
