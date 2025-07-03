@@ -10,6 +10,10 @@ import torch.nn.functional as F
 import xarray as xr
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.utilities.types import (
+    Optimizer,
+    OptimizerLRSchedulerConfig,
+)
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoConfig, AutoModelForMaskedLM
 
@@ -151,6 +155,7 @@ class StudentCaduceus(L.LightningModule):
     lr: float
     alpha: float
     grad_check_interval: int
+    cosine_anneal: bool
 
     def __init__(
         self,
@@ -159,9 +164,11 @@ class StudentCaduceus(L.LightningModule):
         temperature: float = 4.0,
         alpha: float = 0.8,
         grad_check_interval: int = 100,
+        cosine_anneal: bool = False,
     ) -> None:
         super().__init__()
         self.grad_check_interval = grad_check_interval
+        self.cosine_anneal = cosine_anneal
         self.save_hyperparameters()
 
         # Create student config (half depth and width)
@@ -340,8 +347,22 @@ class StudentCaduceus(L.LightningModule):
         """
         return self._base_validation_step(batch, batch_idx, is_final_val=True)
 
-    def configure_optimizers(self) -> torch.optim.Optimizer:
-        return torch.optim.AdamW(self.parameters(), lr=self.lr)
+    def configure_optimizers(
+        self,
+    ) -> Optimizer | OptimizerLRSchedulerConfig:
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
+        if self.cosine_anneal:
+            assert isinstance(self.trainer.limit_train_batches, int)
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": torch.optim.lr_scheduler.CosineAnnealingLR(
+                        optimizer, T_max=self.trainer.estimated_stepping_batches
+                    ),
+                    "interval": "step",
+                },
+            }
+        return optimizer
 
 
 def main() -> None:
@@ -427,6 +448,11 @@ def main() -> None:
         default=100,
         help="Steps interval between grad metrics",
     )
+    parser.add_argument(
+        "--cosine_anneal",
+        action="store_true",
+        help="Use cosine annealing for learning rate scheduling",
+    )
 
     args = parser.parse_args()
 
@@ -452,6 +478,7 @@ def main() -> None:
         temperature=args.temperature,
         alpha=args.alpha,
         grad_check_interval=args.grad_check_interval,
+        cosine_anneal=args.cosine_anneal,
     )
 
     # Setup logger
