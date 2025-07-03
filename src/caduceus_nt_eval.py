@@ -53,7 +53,7 @@ def main(cfg: DictConfig) -> None:
     summarize_performance(results)
 
     # Save results
-    results_path = output_path / "model_results.csv"
+    results_path = output_path / f"{cfg.experiment_name}.csv"
     results.to_csv(results_path, index=False)
     logger.info(f"Results saved to {results_path}")
 
