@@ -391,9 +391,6 @@ def main() -> None:
         help="Weight for distillation soft targets loss (1 - alpha for hard targets loss)",
     )
     parser.add_argument(
-        "--train_ratio", type=float, default=0.9, help="Train/validation split ratio"
-    )
-    parser.add_argument(
         "--num_workers", type=int, default=4, help="Number of data loading workers"
     )
     parser.add_argument(
