@@ -194,8 +194,10 @@ class StudentCaduceus(L.LightningModule):
         self.lr = lr
         self.alpha = alpha
 
-    def forward(self, input_ids: torch.Tensor) -> Any:
-        return self.student(input_ids)
+    def forward(
+        self, input_ids: torch.Tensor, output_hidden_states: bool = False
+    ) -> Any:
+        return self.student(input_ids, output_hidden_states=output_hidden_states)
 
     def training_step(self, batch: EXAMPLE_T, batch_idx: int) -> torch.Tensor:
         input_ids, teacher_logits = batch
