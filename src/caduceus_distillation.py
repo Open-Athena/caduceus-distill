@@ -4,6 +4,7 @@ import multiprocessing
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+import fsspec
 import lightning as L
 import torch
 import torch.nn.functional as F
@@ -452,8 +453,15 @@ def main() -> None:
         action="store_true",
         help="Use cosine annealing for learning rate scheduling",
     )
+    parser.add_argument(
+        "--gcs-bucket",
+        type=str,
+        default="cadu-distill",
+        help="GCS bucket name (e.g. for checkpoints)",
+    )
 
     args = parser.parse_args()
+    gcs_bucket = args.gcs_bucket
 
     # Initialize datasets
     train_dataset = DistillationDataset(args.zarr_path_train)
@@ -481,21 +489,36 @@ def main() -> None:
     )
 
     # Setup logger
-    logger: WandbLogger | None = None
+    wandb_logger: WandbLogger | None = None
+
+    datetime_str = datetime.now(UTC).strftime("%Y%m%d_%H%M")
+    run_name_parts = [datetime_str]
+    if args.run_name_suffix:
+        run_name_parts.append(args.run_name_suffix)
+    full_run_name = "_".join(run_name_parts)
+    logger.info(f"Run name: {full_run_name}")
+
     if not args.no_wandb:
-        datetime_str = datetime.now(UTC).strftime("%Y%m%d_%H%M")
+        wandb_logger = WandbLogger(project=args.project_name, name=full_run_name)
 
-        run_name_parts = [datetime_str]
-        if args.run_name_suffix:
-            run_name_parts.append(args.run_name_suffix)
+    try:
+        from gcsfs import GCSFileSystem
 
-        full_run_name = "_".join(run_name_parts)
-        logger = WandbLogger(project=args.project_name, name=full_run_name)
+        fs: GCSFileSystem = fsspec.filesystem("gs")
+        assert len(fs.info(f"gs://{gcs_bucket}")) > 0
+        checkpoint_dirpath = f"gs://{gcs_bucket}/checkpoints/{full_run_name}/"
+    except Exception:
+        logger.exception(
+            "Failed to probe GCS, will use local filesystem for checkpoints."
+        )
+        checkpoint_dirpath = f"checkpoints/{full_run_name}/"
 
-    # Setup callbacks
+    logger.info(f"Checkpoint directory: {checkpoint_dirpath}")
     checkpoint_callback = ModelCheckpoint(
-        dirpath="checkpoints/",
-        filename="student-caduceus-{epoch:02d}-{val_loss:.2f}",
+        dirpath=checkpoint_dirpath,
+        filename="student-caduceus__epoch={epoch:02d}__val_loss_total={val/loss/total:.3f}__step={step}",
+        # NOTE: because the metric contains slashes
+        auto_insert_metric_name=False,
         monitor="val/loss/total",
         mode="min",
         save_top_k=3,
@@ -523,7 +546,7 @@ def main() -> None:
         precision=precision,
         gradient_clip_val=1.0,
         log_every_n_steps=1,
-        logger=logger,
+        logger=wandb_logger,
         callbacks=[checkpoint_callback, lr_monitor],
         accelerator="auto",
         devices="auto",
@@ -535,8 +558,8 @@ def main() -> None:
         limit_test_batches=args.max_final_val_batches,
         accumulate_grad_batches=args.accumulate_grad_batches,
     )
-    if logger is not None:
-        logger.log_hyperparams(
+    if wandb_logger is not None:
+        wandb_logger.log_hyperparams(
             {
                 "batch_size": args.batch_size,
                 "accumulate_grad_batches": args.accumulate_grad_batches,
@@ -561,6 +584,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
     # Set start method to 'spawn' to prevent fork-safety issues with
     # multi-threaded libraries (e.g. zarr) in worker processes.
     multiprocessing.set_start_method("spawn")
