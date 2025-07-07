@@ -22,6 +22,7 @@ dependencies = [
     "scikit-learn>=1.7.0",
     "gcsfs>=2025.3.0",
     "universal-pathlib>=0.2.6",
+    "typer>=0.16.0",
 ]
 
 [project.optional-dependencies]

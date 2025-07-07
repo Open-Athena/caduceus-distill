@@ -25,7 +25,6 @@ from transformers import (
 )
 
 from src.caduceus_distillation import StudentCaduceus
-from src.utils import get_root_path
 
 logger = logging.getLogger(__name__)
 
@@ -146,9 +145,7 @@ def load_caduceus(
             model_name, config=model_config, trust_remote_code=True
         )
     else:
-        model = StudentCaduceus.load_from_checkpoint(
-            get_root_path().joinpath("checkpoints") / model_to_load,
-        )
+        model = StudentCaduceus.load_from_checkpoint(model_to_load)
 
     num_gpus = torch.cuda.device_count()
     # Sequential warm-up to prevent a race condition in the Triton kernel autotuner.
