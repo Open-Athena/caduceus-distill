@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 import fsspec
 import lightning as L
+import numpy as np
 import torch
 import torch.nn.functional as F
 import xarray as xr
@@ -158,6 +159,9 @@ class StudentCaduceus(L.LightningModule):
     grad_check_interval: int
     cosine_anneal: bool
 
+    # A set of global steps at which to perform diagnostic checks.
+    _diagnostic_steps: set[int] | None = None
+
     def __init__(
         self,
         teacher_model_name: str = "kuleshov-group/caduceus-ps_seqlen-131k_d_model-256_n_layer-16",
@@ -166,10 +170,12 @@ class StudentCaduceus(L.LightningModule):
         alpha: float = 0.8,
         grad_check_interval: int = 100,
         cosine_anneal: bool = False,
+        log_schedule_steps: list[int] | None = None,
     ) -> None:
         super().__init__()
         self.grad_check_interval = grad_check_interval
         self.cosine_anneal = cosine_anneal
+        self._diagnostic_steps = set(log_schedule_steps) if log_schedule_steps else None
         self.save_hyperparameters()
 
         # Create student config (half depth and width)
@@ -227,7 +233,12 @@ class StudentCaduceus(L.LightningModule):
         return loss
 
     def on_before_optimizer_step(self, optimizer: torch.optim.Optimizer) -> None:
-        if self.global_step % self.grad_check_interval != 0:
+        if self._diagnostic_steps:
+            # Logarithmic schedule is active
+            if self.global_step not in self._diagnostic_steps:
+                return
+        # Fallback to linear schedule
+        elif self.global_step % self.grad_check_interval != 0:
             return
 
         lr = optimizer.param_groups[0]["lr"]
@@ -368,6 +379,23 @@ class StudentCaduceus(L.LightningModule):
         return optimizer
 
 
+class LogarithmicValidationCallback(L.Callback):
+    def __init__(self, validation_steps: set[int]):
+        super().__init__()
+        self.validation_steps = validation_steps
+
+    def on_train_batch_end(
+        self,
+        trainer: L.Trainer,
+        pl_module: L.LightningModule,
+        outputs: Any,
+        batch: Any,
+        batch_idx: int,
+    ) -> None:
+        if trainer.global_step in self.validation_steps:
+            trainer.validate(pl_module, dataloaders=trainer.val_dataloaders)
+
+
 def main() -> None:
     L.seed_everything(42, workers=True)
 
@@ -449,6 +477,11 @@ def main() -> None:
         help="Steps interval between grad metrics",
     )
     parser.add_argument(
+        "--log_schedule",
+        action="store_true",
+        help="Use logarithmic scheduling for validation and gradient checks.",
+    )
+    parser.add_argument(
         "--cosine_anneal",
         action="store_true",
         help="Use cosine annealing for learning rate scheduling",
@@ -479,16 +512,8 @@ def main() -> None:
         for ds in [train_dataset, val_dataset, val_dataset]
     ]
 
-    # Initialize model
-    model = StudentCaduceus(
-        lr=args.lr,
-        temperature=args.temperature,
-        alpha=args.alpha,
-        grad_check_interval=args.grad_check_interval,
-        cosine_anneal=args.cosine_anneal,
-    )
-
     # Setup logger
+    callbacks: list[L.Callback] = []
     wandb_logger: WandbLogger | None = None
 
     datetime_str = datetime.now(UTC).strftime("%Y%m%d_%H%M")
@@ -514,17 +539,19 @@ def main() -> None:
         checkpoint_dirpath = f"checkpoints/{full_run_name}/"
 
     logger.info(f"Checkpoint directory: {checkpoint_dirpath}")
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=checkpoint_dirpath,
-        filename="student-caduceus__epoch={epoch:02d}__val_loss_total={val/loss/total:.3f}__step={step}",
-        # NOTE: because the metric contains slashes
-        auto_insert_metric_name=False,
-        monitor="val/loss/total",
-        mode="min",
-        save_top_k=3,
-        save_last=True,
+    callbacks.append(
+        ModelCheckpoint(
+            dirpath=checkpoint_dirpath,
+            filename="student-caduceus__epoch={epoch:02d}__val_loss_total={val/loss/total:.3f}__step={step}",
+            # NOTE: because the metric contains slashes
+            auto_insert_metric_name=False,
+            monitor="val/loss/total",
+            mode="min",
+            save_top_k=3,
+            save_last=True,
+        )
     )
-    lr_monitor = LearningRateMonitor(logging_interval="step")
+    callbacks.append(LearningRateMonitor(logging_interval="step"))
 
     # Dynamically set precision based on hardware support.
     precision: Literal["bf16-mixed", "16-mixed", "32-true"]
@@ -540,6 +567,40 @@ def main() -> None:
         precision = "32-true"
         print("INFO: No GPU available. Using '32-true' precision on CPU.")
 
+    # Determine total training steps for schedule calculation
+    if args.max_train_batches:
+        total_steps = min(len(train_loader), args.max_train_batches) * args.max_epoch
+    else:
+        total_steps = len(train_loader) * args.max_epoch
+
+    log_schedule_steps: list[int] | None = None
+    val_check_interval: int = args.val_check_interval
+    if args.log_schedule:
+        if total_steps > 1 and args.val_check_interval > 0:
+            num_points = total_steps // args.val_check_interval
+            if num_points > 1:
+                log_schedule_steps_np = np.logspace(
+                    0, np.log10(total_steps), num=num_points
+                ).astype(int)
+                log_schedule_steps = np.unique(log_schedule_steps_np).tolist()
+                logger.info(
+                    f"Using log schedule with {len(log_schedule_steps)} points. "
+                    f"First 5: {log_schedule_steps[:5]}, Last 5: {log_schedule_steps[-5:]}"
+                )
+                callbacks.append(LogarithmicValidationCallback(set(log_schedule_steps)))
+                # Disable trainer's internal validation checking by setting it to a value that will never be reached.
+                val_check_interval = total_steps + 1
+
+    # Initialize model
+    model = StudentCaduceus(
+        lr=args.lr,
+        temperature=args.temperature,
+        alpha=args.alpha,
+        grad_check_interval=args.grad_check_interval,
+        cosine_anneal=args.cosine_anneal,
+        log_schedule_steps=log_schedule_steps,
+    )
+
     # Initialize trainer
     trainer = L.Trainer(
         max_epochs=args.max_epoch,
@@ -547,12 +608,12 @@ def main() -> None:
         gradient_clip_val=1.0,
         log_every_n_steps=1,
         logger=wandb_logger,
-        callbacks=[checkpoint_callback, lr_monitor],
+        callbacks=callbacks,
         accelerator="auto",
         devices="auto",
         limit_train_batches=args.max_train_batches,
         # Validation settings
-        val_check_interval=args.val_check_interval,
+        val_check_interval=val_check_interval,
         check_val_every_n_epoch=1,
         limit_val_batches=args.max_val_batches,
         limit_test_batches=args.max_final_val_batches,
@@ -575,6 +636,7 @@ def main() -> None:
                 "grad_check_interval": args.grad_check_interval,
                 "precision": precision,
                 "cosine_anneal": args.cosine_anneal,
+                "log_schedule": args.log_schedule,
             }
         )
 
