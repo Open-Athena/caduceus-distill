@@ -2,10 +2,12 @@ import argparse
 import logging
 import multiprocessing
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any, Literal
 
 import fsspec
 import lightning as L
+import numpy as np
 import torch
 import torch.nn.functional as F
 import xarray as xr
@@ -148,6 +150,26 @@ class DistillationDataset(Dataset[EXAMPLE_T]):
 
         teacher_logits = torch.tensor(sample.logits.values, dtype=torch.float32)
         return input_ids, teacher_logits
+
+
+class ValidationScheduler(L.Callback):
+    def __init__(self, val_schedule: set[int]) -> None:
+        self.schedule = val_schedule
+        # NOTE: when gradient accumulation is > 1, the global step updates every `accumulate_grad_batches` steps,
+        # to compute validation once per global step, we need to track the last global step
+        self._last_val_global_step: int = -1
+        self.trainer: L.Trainer | None = None
+
+    def on_fit_start(self, trainer: L.Trainer, *args: Any, **kwargs: Any) -> None:
+        self.trainer = trainer
+        self.trainer.fit_loop.epoch_loop._should_check_val_fx = partial(self.step)  # type: ignore[method-assign]
+
+    def step(self, *args: Any, **kwargs: Any) -> bool:
+        assert self.trainer is not None
+        cur_step = self.trainer.global_step
+        should_run = cur_step in self.schedule and self._last_val_global_step < cur_step
+        self._last_val_global_step = cur_step
+        return should_run
 
 
 class StudentCaduceus(L.LightningModule):
@@ -388,20 +410,28 @@ def main() -> None:
     parser.add_argument(
         "--max_train_batches",
         type=int,
-        default=None,
+        # NOTE: this is based on the scaling laws. The teacher was trained on 400k batches, student is about
+        # 15% of the teacher --> 60k batches.
+        default=60_000,
         help="Limit train batches per epoch (defaults to all)",
     )
     parser.add_argument(
         "--max_val_batches",
         type=int,
-        default=10,
-        help="Limit validation batches during training (defaults to 10)",
+        default=128,
+        help="Limit validation batches during training (defaults to 128)",
     )
     parser.add_argument(
         "--max_final_val_batches",
         type=int,
-        default=1000,
-        help="Limit final validation batches (defaults to 1000).",
+        default=1024,
+        help="Limit final validation batches (defaults to 1024).",
+    )
+    parser.add_argument(
+        "--val_check_interval",
+        type=int,
+        default=50,
+        help="Used to compute validation schedule, validation schedule is logarithmic with this interval",
     )
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
@@ -436,12 +466,6 @@ def main() -> None:
         help="Number of batches to accumulate gradients over (default: 1, no accumulation)",
     )
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
-    parser.add_argument(
-        "--val_check_interval",
-        type=int,
-        default=50,
-        help="Steps interval between eval metrics",
-    )
     parser.add_argument(
         "--grad_check_interval",
         type=int,
@@ -540,6 +564,22 @@ def main() -> None:
         precision = "32-true"
         print("INFO: No GPU available. Using '32-true' precision on CPU.")
 
+    # Compute the validation schedule
+    max_train_batches = args.max_train_batches
+    accumulate_grad_batches = args.accumulate_grad_batches
+    val_check_interval = args.val_check_interval
+    max_global_step = int(np.ceil(max_train_batches / accumulate_grad_batches))
+    val_schedule = set(
+        np.logspace(
+            0,
+            np.log10(max_global_step - 1),
+            num=max_global_step // val_check_interval,
+            dtype=int,
+        )
+    )
+    logger.info(f"Validation schedule: {sorted(val_schedule)}")
+    val_scheduler = ValidationScheduler(val_schedule)
+
     # Initialize trainer
     trainer = L.Trainer(
         max_epochs=args.max_epoch,
@@ -547,31 +587,31 @@ def main() -> None:
         gradient_clip_val=1.0,
         log_every_n_steps=1,
         logger=wandb_logger,
-        callbacks=[checkpoint_callback, lr_monitor],
+        callbacks=[checkpoint_callback, lr_monitor, val_scheduler],
         accelerator="auto",
         devices="auto",
-        limit_train_batches=args.max_train_batches,
+        limit_train_batches=max_train_batches,
         # Validation settings
-        val_check_interval=args.val_check_interval,
+        val_check_interval=val_check_interval,
         check_val_every_n_epoch=1,
         limit_val_batches=args.max_val_batches,
         limit_test_batches=args.max_final_val_batches,
-        accumulate_grad_batches=args.accumulate_grad_batches,
+        accumulate_grad_batches=accumulate_grad_batches,
     )
     if wandb_logger is not None:
         wandb_logger.log_hyperparams(
             {
                 "batch_size": args.batch_size,
-                "accumulate_grad_batches": args.accumulate_grad_batches,
+                "accumulate_grad_batches": accumulate_grad_batches,
                 "learning_rate": args.lr,
                 "temperature": args.temperature,
                 "alpha": args.alpha,
                 "max_epochs": args.max_epoch,
-                "max_train_batches": args.max_train_batches,
+                "max_train_batches": max_train_batches,
                 "max_val_batches": args.max_val_batches,
                 "max_final_val_batches": args.max_final_val_batches,
                 "num_workers": args.num_workers,
-                "val_check_interval": args.val_check_interval,
+                "val_check_interval": val_check_interval,
                 "grad_check_interval": args.grad_check_interval,
                 "precision": precision,
                 "cosine_anneal": args.cosine_anneal,
