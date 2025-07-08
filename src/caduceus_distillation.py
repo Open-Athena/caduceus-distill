@@ -152,12 +152,17 @@ class DistillationDataset(Dataset[EXAMPLE_T]):
         return input_ids, teacher_logits
 
 
-class ValidationScheduler(L.Callback):
-    def __init__(self, val_schedule: set[int]) -> None:
-        self.schedule = val_schedule
+class CallbackWithExplicitSchedule(L.Callback):
+    def __init__(self, schedule: set[int]) -> None:
+        self.schedule = schedule
         # NOTE: when gradient accumulation is > 1, the global step updates every `accumulate_grad_batches` steps,
         # to compute validation once per global step, we need to track the last global step
-        self._last_val_global_step: int = -1
+        self._last_global_step: int = -1
+
+
+class ValidationScheduler(CallbackWithExplicitSchedule):
+    def __init__(self, schedule: set[int]) -> None:
+        super().__init__(schedule)
         self.trainer: L.Trainer | None = None
 
     def on_fit_start(self, trainer: L.Trainer, *args: Any, **kwargs: Any) -> None:
@@ -166,10 +171,80 @@ class ValidationScheduler(L.Callback):
 
     def step(self, *args: Any, **kwargs: Any) -> bool:
         assert self.trainer is not None
-        cur_step = self.trainer.global_step
-        should_run = cur_step in self.schedule and self._last_val_global_step < cur_step
-        self._last_val_global_step = cur_step
+        # NOTE: this method is called after the global_step is incremented
+        last_step = self.trainer.global_step - 1
+        should_run = last_step in self.schedule and self._last_global_step < last_step
+        self._last_global_step = last_step
         return should_run
+
+
+class GradientNormLogger(CallbackWithExplicitSchedule):
+    def on_before_optimizer_step(
+        self, trainer: L.Trainer, pl_module: L.LightningModule, optimizer: Optimizer
+    ) -> None:
+        cur_step = trainer.global_step
+        should_log = cur_step in self.schedule and self._last_global_step < cur_step
+        self._last_global_step = cur_step
+
+        if not should_log:
+            return
+
+        lr = optimizer.param_groups[0]["lr"]
+
+        # Full list of layers available here: https://huggingface.co/kuleshov-group/caduceus-ps_seqlen-131k_d_model-256_n_layer-16?show_file_info=model.safetensors
+        significant_param_suffixes = [
+            # in_proj.weight: This is the input projection matrix (i.e. entry point of the mamba block).
+            "mamba_fwd.in_proj.weight",
+            # out_proj.weight: The output projection matrix (i.e. final transformation within the mixer).
+            "mamba_fwd.out_proj.weight",
+            # x_proj.weight & dt_proj.weight: project the input x to dynamically generate the SSM parameters
+            "mamba_fwd.x_proj.weight",
+            "mamba_fwd.dt_proj.weight",
+            # Forward (mamba_fwd) and reverse (mamba_rev) passes are tracked separately (weights are independent)
+            "mamba_rev.x_proj.weight",
+            "mamba_rev.dt_proj.weight",
+        ]
+
+        for name, param in pl_module.named_parameters():
+            if param.grad is None:
+                continue
+
+            metric_prefix = None
+            is_significant_layer_param = any(
+                name.endswith(suffix) for suffix in significant_param_suffixes
+            )
+            # The first layer of the network
+            is_embedding = "word_embeddings.embedding.weight" in name
+
+            if is_significant_layer_param:
+                try:
+                    parts = name.split(".")
+                    layer_idx_pos = parts.index("layers") + 1
+                    layer_idx = int(parts[layer_idx_pos])
+                    clean_param_name = ".".join(parts[layer_idx_pos + 1 :]).replace(
+                        "mixer.submodule.", ""
+                    )
+                    metric_prefix = f"diag/L{layer_idx}/{clean_param_name}"
+                except (ValueError, IndexError):
+                    continue
+            elif is_embedding:
+                metric_prefix = "diag/embed"
+
+            if metric_prefix:
+                grad_norm = param.grad.norm(2)
+                data_std = param.data.std()
+                update_ratio = torch.tensor(
+                    0.0, device=param.device
+                )  # Default to 0 if data_std is 0
+                if data_std > 0:
+                    update_ratio = lr * param.grad.std() / (data_std + 1e-8)
+
+                pl_module.log_dict(
+                    {
+                        f"{metric_prefix}/grad_norm": grad_norm,
+                        f"{metric_prefix}/update_ratio": update_ratio,
+                    }
+                )
 
 
 class StudentCaduceus(L.LightningModule):
@@ -177,7 +252,6 @@ class StudentCaduceus(L.LightningModule):
     temperature: float
     lr: float
     alpha: float
-    grad_check_interval: int
     cosine_anneal: bool
 
     def __init__(
@@ -186,11 +260,9 @@ class StudentCaduceus(L.LightningModule):
         lr: float = 1e-3,
         temperature: float = 4.0,
         alpha: float = 0.8,
-        grad_check_interval: int = 100,
         cosine_anneal: bool = False,
     ) -> None:
         super().__init__()
-        self.grad_check_interval = grad_check_interval
         self.cosine_anneal = cosine_anneal
         self.save_hyperparameters()
 
@@ -247,67 +319,6 @@ class StudentCaduceus(L.LightningModule):
             on_epoch=True,
         )
         return loss
-
-    def on_before_optimizer_step(self, optimizer: torch.optim.Optimizer) -> None:
-        if self.global_step % self.grad_check_interval != 0:
-            return
-
-        lr = optimizer.param_groups[0]["lr"]
-
-        # Full list of layers available here: https://huggingface.co/kuleshov-group/caduceus-ps_seqlen-131k_d_model-256_n_layer-16?show_file_info=model.safetensors
-        significant_param_suffixes = [
-            # in_proj.weight: This is the input projection matrix (i.e. entry point of the mamba block).
-            "mamba_fwd.in_proj.weight",
-            # out_proj.weight: The output projection matrix (i.e. final transformation within the mixer).
-            "mamba_fwd.out_proj.weight",
-            # x_proj.weight & dt_proj.weight: project the input x to dynamically generate the SSM parameters
-            "mamba_fwd.x_proj.weight",
-            "mamba_fwd.dt_proj.weight",
-            # Forward (mamba_fwd) and reverse (mamba_rev) passes are tracked separately (weights are independent)
-            "mamba_rev.x_proj.weight",
-            "mamba_rev.dt_proj.weight",
-        ]
-
-        for name, param in self.student.named_parameters():
-            if param.grad is None:
-                continue
-
-            metric_prefix = None
-            is_significant_layer_param = any(
-                name.endswith(suffix) for suffix in significant_param_suffixes
-            )
-            # The first layer of the network
-            is_embedding = "word_embeddings.embedding.weight" in name
-
-            if is_significant_layer_param:
-                try:
-                    parts = name.split(".")
-                    layer_idx_pos = parts.index("layers") + 1
-                    layer_idx = int(parts[layer_idx_pos])
-                    clean_param_name = ".".join(parts[layer_idx_pos + 1 :]).replace(
-                        "mixer.submodule.", ""
-                    )
-                    metric_prefix = f"diag/L{layer_idx}/{clean_param_name}"
-                except (ValueError, IndexError):
-                    continue
-            elif is_embedding:
-                metric_prefix = "diag/embed"
-
-            if metric_prefix:
-                grad_norm = param.grad.norm(2)
-                data_std = param.data.std()
-                update_ratio = torch.tensor(
-                    0.0, device=param.device
-                )  # Default to 0 if data_std is 0
-                if data_std > 0:
-                    update_ratio = lr * param.grad.std() / (data_std + 1e-8)
-
-                self.log_dict(
-                    {
-                        f"{metric_prefix}/grad_norm": grad_norm,
-                        f"{metric_prefix}/update_ratio": update_ratio,
-                    }
-                )
 
     def _base_validation_step(
         self,
@@ -433,6 +444,11 @@ def main() -> None:
         default=50,
         help="Used to compute validation schedule, validation schedule is logarithmic with this interval",
     )
+    parser.add_argument(
+        "--val_log_interval_sampling",
+        action="store_true",
+        help="If true validation will log linearly in log space",
+    )
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument(
@@ -466,12 +482,6 @@ def main() -> None:
         help="Number of batches to accumulate gradients over (default: 1, no accumulation)",
     )
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
-    parser.add_argument(
-        "--grad_check_interval",
-        type=int,
-        default=100,
-        help="Steps interval between grad metrics",
-    )
     parser.add_argument(
         "--cosine_anneal",
         action="store_true",
@@ -508,7 +518,6 @@ def main() -> None:
         lr=args.lr,
         temperature=args.temperature,
         alpha=args.alpha,
-        grad_check_interval=args.grad_check_interval,
         cosine_anneal=args.cosine_anneal,
     )
 
@@ -565,20 +574,30 @@ def main() -> None:
         print("INFO: No GPU available. Using '32-true' precision on CPU.")
 
     # Compute the validation schedule
-    max_train_batches = args.max_train_batches
-    accumulate_grad_batches = args.accumulate_grad_batches
-    val_check_interval = args.val_check_interval
-    max_global_step = int(np.ceil(max_train_batches / accumulate_grad_batches))
-    val_schedule = set(
-        np.logspace(
-            0,
-            np.log10(max_global_step - 1),
-            num=max_global_step // val_check_interval,
-            dtype=int,
+    if args.val_log_interval_sampling:
+        max_train_batches = args.max_train_batches
+        accumulate_grad_batches = args.accumulate_grad_batches
+        val_check_interval = args.val_check_interval
+        max_global_step = int(np.ceil(max_train_batches / accumulate_grad_batches))
+        val_schedule = set(
+            np.logspace(
+                0,
+                np.log10(max_global_step - 1),
+                num=max_global_step // val_check_interval,
+                dtype=int,
+            )
         )
-    )
+    else:
+        # Linear schedule
+        max_train_batches = args.max_train_batches
+        accumulate_grad_batches = args.accumulate_grad_batches
+        val_check_interval = args.val_check_interval
+        max_global_step = int(np.ceil(max_train_batches / accumulate_grad_batches))
+        val_schedule = set(range(0, max_global_step, val_check_interval))
+
     logger.info(f"Validation schedule: {sorted(val_schedule)}")
-    val_scheduler = ValidationScheduler(val_schedule)
+    validation_scheduler = ValidationScheduler(val_schedule)
+    gradient_norm_logger = GradientNormLogger(val_schedule)
 
     # Initialize trainer
     trainer = L.Trainer(
@@ -587,7 +606,12 @@ def main() -> None:
         gradient_clip_val=1.0,
         log_every_n_steps=1,
         logger=wandb_logger,
-        callbacks=[checkpoint_callback, lr_monitor, val_scheduler],
+        callbacks=[
+            checkpoint_callback,
+            lr_monitor,
+            validation_scheduler,
+            gradient_norm_logger,
+        ],
         accelerator="auto",
         devices="auto",
         limit_train_batches=max_train_batches,
@@ -612,7 +636,7 @@ def main() -> None:
                 "max_final_val_batches": args.max_final_val_batches,
                 "num_workers": args.num_workers,
                 "val_check_interval": val_check_interval,
-                "grad_check_interval": args.grad_check_interval,
+                "val_log_interval_sampling": args.val_log_interval_sampling,
                 "precision": precision,
                 "cosine_anneal": args.cosine_anneal,
             }
