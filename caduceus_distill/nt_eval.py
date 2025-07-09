@@ -55,10 +55,10 @@ def main(
     chunk_size: Annotated[
         int, typer.Option(help="Chunk size for processing", min=1)
     ] = 100,
-    # TODO: why do we need this option?
+    # NOTE: when enabled, this gives us results worse than random - likely because the network is improperly initialized
     disable_fused_add_norm: Annotated[
         bool, typer.Option(help="Disable fused add norm")
-    ] = True,
+    ] = False,
     output_dir: Annotated[
         str,
         typer.Option(help="Output directory for results. Can be GCS or local path."),
