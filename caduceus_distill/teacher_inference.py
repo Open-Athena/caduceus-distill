@@ -15,8 +15,8 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForMaskedLM, AutoTokenizer, PreTrainedTokenizer
 from upath import UPath
 
-from caduceus_distill.hg38_dataset import HG38_EXAMPLE_T, HG38Dataset
-from caduceus_distill.utils import get_root_path, setup_basic_logging
+from caduceus_distill.data.hg38_dataset import HG38_EXAMPLE_T, HG38Dataset
+from caduceus_distill.utils.utils import get_root_path, setup_basic_logging
 
 
 def generate_soft_labels(

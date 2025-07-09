@@ -25,7 +25,7 @@ from upath import UPath
 from upath.implementations.local import PosixUPath
 
 from caduceus_distill.distill import StudentCaduceus
-from caduceus_distill.utils import sanitize_name, setup_basic_logging
+from caduceus_distill.utils.utils import sanitize_name, setup_basic_logging
 
 logger = logging.getLogger(__name__)
 
