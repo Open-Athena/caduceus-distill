@@ -1,14 +1,14 @@
-import argparse
 import os
 import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import numpy as np
 import torch
 import torch.nn as nn
+import typer
 import xarray as xr
 from torch.cuda.amp import autocast
 from torch.utils.data import DataLoader
@@ -16,7 +16,7 @@ from transformers import AutoModelForMaskedLM, AutoTokenizer, PreTrainedTokenize
 from upath import UPath
 
 from caduceus_distill.hg38_dataset import HG38_EXAMPLE_T, HG38Dataset
-from caduceus_distill.utils import get_root_path
+from caduceus_distill.utils import get_root_path, setup_basic_logging
 
 
 def generate_soft_labels(
@@ -269,68 +269,75 @@ def generate_soft_labels(
             )
 
 
-if __name__ == "__main__":
-    default_bed_file = get_root_path().joinpath("data", "hg38", "human-sequences.bed")
-    default_fasta_file = get_root_path().joinpath("data", "hg38", "hg38.ml.fa")
-
-    parser = argparse.ArgumentParser(
-        description="Generate soft labels from FASTA sequences using Caduceus model"
-    )
-    parser.add_argument("output_path", type=str, help="Output Zarr file path")
-    parser.add_argument(
-        "--fasta_file", type=str, help="Path to FASTA file", default=default_fasta_file
-    )
-    parser.add_argument(
-        "--bed_file", type=str, help="Path to BED file", default=default_bed_file
-    )
-    parser.add_argument(
-        "--split",
-        type=str,
-        help="hg38 dataset split (i.e., 'train', 'valid', 'test')",
-        default="train",
-    )
-    parser.add_argument(
-        "--seq-length",
-        type=int,
-        default=2**17,
-        help=f"Chunk size for sequences (default: {2**17})",
-    )
-    parser.add_argument(
-        "--batch-size", type=int, default=4, help="Batch size (default: 4)"
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        help="Device to use (e.g., 'cuda' or 'cpu')",
-    )
-    parser.add_argument(
-        "--max-batches",
-        type=int,
-        default=None,
-        help="Maximum number of batches to process (default: all batches)",
-    )
-
-    args = parser.parse_args()
-
+def main(
+    output_path: Annotated[str, typer.Argument(help="Output Zarr file path")],
+    fasta_file: Annotated[
+        str,
+        typer.Option(
+            help="Path to FASTA file",
+        ),
+    ] = str(get_root_path().joinpath("data", "hg38", "hg38.ml.fa")),
+    bed_file: Annotated[
+        str,
+        typer.Option(
+            help="Path to BED file",
+        ),
+    ] = str(get_root_path().joinpath("data", "hg38", "human-sequences.bed")),
+    split: Annotated[
+        str,
+        typer.Option(
+            help="hg38 dataset split (i.e., 'train', 'valid', 'test')",
+        ),
+    ] = "train",
+    seq_length: Annotated[
+        int,
+        typer.Option(
+            help=f"Chunk size for sequences (default: {2**17})",
+        ),
+    ] = 2
+    ** 17,
+    batch_size: Annotated[
+        int,
+        typer.Option(
+            help="Batch size (default: 4)",
+        ),
+    ] = 4,
+    device: Annotated[
+        str,
+        typer.Option(
+            help="Device to use, either 'cuda' or 'cpu' (default: 'cuda')",
+        ),
+    ] = "cuda",
+    max_batches: Annotated[
+        int | None,
+        typer.Option(
+            help="Maximum number of batches to process (default: all batches)",
+        ),
+    ] = None,
+) -> None:
     # To see a benefit from multiple GPUs, the batch size must be >= number of GPUs.
-    if args.device == "cuda" and torch.cuda.is_available():
+    if device == "cuda" and torch.cuda.is_available():
         num_gpus = torch.cuda.device_count()
-        if num_gpus > 1 and args.batch_size < num_gpus:
+        if num_gpus > 1 and batch_size < num_gpus:
             print(
-                f"Warning: Batch size ({args.batch_size}) is less than the number of available GPUs ({num_gpus})."
+                f"Warning: Batch size ({batch_size}) is less than the number of available GPUs ({num_gpus})."
             )
             print(
                 f"To fully utilize all GPUs, increase batch size to be at least {num_gpus}."
             )
 
     generate_soft_labels(
-        bed_file=args.bed_file,
-        fasta_file=args.fasta_file,
-        output_path=args.output_path,
-        split=args.split,
-        seq_length=args.seq_length,
-        batch_size=args.batch_size,
-        device=args.device,
-        max_batches=args.max_batches,
+        bed_file=bed_file,
+        fasta_file=fasta_file,
+        output_path=output_path,
+        split=split,
+        seq_length=seq_length,
+        batch_size=batch_size,
+        device=device,  # type: ignore[arg-type]
+        max_batches=max_batches,
     )
+
+
+if __name__ == "__main__":
+    setup_basic_logging()
+    typer.run(main)

@@ -3,14 +3,11 @@ from typing import Annotated
 import pandas as pd
 import typer
 
-app = typer.Typer()
-
 
 def set_index(df: pd.DataFrame) -> pd.DataFrame:
     return df.set_index(["task_name", "model", "split", "metric"])
 
 
-@app.command()
 def main(
     experiment_path: Annotated[
         str, typer.Argument(help="Path to the experiment result CSV file")
@@ -30,4 +27,4 @@ def main(
 
 
 if __name__ == "__main__":
-    app()
+    typer.run(main)

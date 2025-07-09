@@ -1,17 +1,15 @@
 import logging
 from importlib.util import find_spec
-from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-import hydra
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import tqdm
+import typer
 import xarray as xr
 from datasets import Dataset, load_dataset
-from omegaconf import DictConfig
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegressionCV
 from sklearn.metrics import accuracy_score, f1_score, matthews_corrcoef, roc_auc_score
@@ -23,27 +21,71 @@ from transformers import (
     AutoTokenizer,
     PreTrainedTokenizer,
 )
+from upath import UPath
+from upath.implementations.local import PosixUPath
 
 from caduceus_distill.distill import StudentCaduceus
+from caduceus_distill.utils import sanitize_name, setup_basic_logging
 
 logger = logging.getLogger(__name__)
 
 
-@hydra.main(version_base=None, config_path=".", config_name="config")
-def main(cfg: DictConfig) -> None:
-    logging.basicConfig(level=logging.INFO)
-    logger.info(f"Running with config: {cfg}")
+def main(
+    model_to_load: Annotated[
+        str,
+        typer.Option(
+            help="Model to load; 'random' for random initialization, 'teacher' for pre-trained model, or path to a checkpoint"
+        ),
+    ] = "random",
+    task_group: Annotated[
+        str,
+        typer.Option(
+            help="Task group to use; e.g. `eric_relevant`",
+        ),
+    ] = "eric_relevant",
+    task_limit: Annotated[
+        int | None,
+        typer.Option(
+            help="Limit number of tasks to process; if None, all tasks are processed"
+        ),
+    ] = None,
+    sample_limit: Annotated[
+        int, typer.Option(help="Limit number of samples to process", min=1)
+    ] = 10_000,
+    chunk_size: Annotated[
+        int, typer.Option(help="Chunk size for processing", min=1)
+    ] = 100,
+    # TODO: why do we need this option?
+    disable_fused_add_norm: Annotated[
+        bool, typer.Option(help="Disable fused add norm")
+    ] = True,
+    output_dir: Annotated[
+        str,
+        typer.Option(help="Output directory for results. Can be GCS or local path."),
+    ] = "gs://cadu-distill/nt_eval",
+) -> None:
+    output_path = UPath(output_dir)
+    if isinstance(output_path, PosixUPath):
+        output_path.mkdir(parents=True, exist_ok=True)
 
-    output_path = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
-    features_path = output_path / "features.nc"
+    clean_model_name = sanitize_name(model_to_load)
+
+    features_path = output_path.joinpath("features", clean_model_name)
     features: xr.Dataset
 
     if not features_path.exists():
         logger.info(f"Creating features at {features_path}")
-        features = create_features(cfg)
-        features.to_netcdf(features_path)
+        features = create_features(
+            model_to_load=model_to_load,
+            task_group=task_group,
+            chunk_size=chunk_size,
+            sample_limit=sample_limit,
+            disable_fused_add_norm=disable_fused_add_norm,
+            task_limit=task_limit,
+        )
+        features.to_zarr(features_path.as_posix())
     logger.info(f"Loading features from {features_path}")
-    features = xr.open_dataset(features_path)
+    features = xr.open_zarr(features_path.as_posix())
     logger.info(f"Loaded features:\n{str(features)}")
 
     summarize_labels(features)
@@ -52,8 +94,8 @@ def main(cfg: DictConfig) -> None:
     summarize_performance(results)
 
     # Save results
-    results_path = output_path / f"{cfg.experiment_name}.csv"
-    results.to_csv(results_path, index=False)
+    results_path = output_path.joinpath(f"{clean_model_name}.csv")
+    results.to_csv(results_path.as_posix(), index=False)
     logger.info(f"Results saved to {results_path}")
 
 
@@ -221,12 +263,20 @@ TASK_GROUPS = {
 }
 
 
-def create_features(cfg: DictConfig) -> xr.Dataset:
+def create_features(
+    *,
+    model_to_load: str,
+    task_group: str,
+    chunk_size: int,
+    sample_limit: int,
+    disable_fused_add_norm: bool,
+    task_limit: int | None = None,
+) -> xr.Dataset:
     datasets = []
-    task_names = TASK_GROUPS[cfg.task_group]
-    if cfg.get("task_limit") and cfg.task_limit > 0:
-        logger.info(f"Limiting to {cfg.task_limit} tasks")
-        task_names = task_names[: cfg.task_limit]
+    task_names = TASK_GROUPS[task_group]
+    if task_limit is not None and task_limit > 0:
+        logger.info(f"Limiting to {task_limit} tasks")
+        task_names = task_names[:task_limit]
 
     for task_name in tqdm.tqdm(task_names, desc="Loading task datasets"):
         logger.info(f"Loading task {task_name}")
@@ -235,11 +285,17 @@ def create_features(cfg: DictConfig) -> xr.Dataset:
             num_labels = len(set(dataset["train"]["label"]))
             model, tokenizer = load_caduceus(
                 num_labels=num_labels,
-                model_to_load=cfg.model_to_load,
-                disable_fused_add_norm=cfg.disable_fused_add_norm,
+                model_to_load=model_to_load,
+                disable_fused_add_norm=disable_fused_add_norm,
             )
             for split in ["train", "test"]:
-                ds = create_modeling_dataset(cfg, dataset[split], model, tokenizer)
+                ds = create_modeling_dataset(
+                    chunk_size=chunk_size,
+                    sample_limit=sample_limit,
+                    ds=dataset[split],
+                    model=model,
+                    tokenizer=tokenizer,
+                )
                 ds = ds.assign(
                     split=(("samples", [split] * ds.sizes["samples"])),
                     task_name=(("samples", [task_name] * ds.sizes["samples"])),
@@ -253,15 +309,17 @@ def create_features(cfg: DictConfig) -> xr.Dataset:
 
 
 def create_modeling_dataset(
-    cfg: DictConfig,
+    *,
+    chunk_size: int,
+    sample_limit: int,
     ds: Dataset,
     model: nn.Module,
     tokenizer: PreTrainedTokenizer,
 ) -> xr.Dataset:
-    chunks = torch.split(torch.arange(len(ds)), cfg.chunk_size)
-    if cfg.limit:
-        logger.info(f"Limiting to {cfg.limit} samples")
-        n_chunks = (cfg.limit + cfg.chunk_size - 1) // cfg.chunk_size
+    chunks = torch.split(torch.arange(len(ds)), chunk_size)
+    if sample_limit:
+        logger.info(f"Limiting to {sample_limit} samples")
+        n_chunks = (sample_limit + chunk_size - 1) // chunk_size
         chunks = chunks[:n_chunks]
 
     states = []
@@ -286,7 +344,7 @@ def create_modeling_dataset(
         raise ValueError(
             f"Expected labels to be a list; got {type(labels)=}, {labels=}"
         )
-    labels = labels[: len(features)] if cfg.limit else labels
+    labels = labels[: len(features)] if sample_limit else labels
     return xr.Dataset(
         {"feature": (["samples", "features"], features), "label": ("samples", labels)}
     )
@@ -374,4 +432,5 @@ def run_modeling(features: xr.Dataset, seed: int = 0) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    main()
+    setup_basic_logging()
+    typer.run(main)
