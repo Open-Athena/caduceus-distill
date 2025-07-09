@@ -88,9 +88,22 @@ def distillation_loss(
         input_ids.size(0) > 0
     ), "Input IDs must not be empty after filtering non-specific nucleotides"
 
+    # TODO: can we depend on the Caduceus tokennizer and get these indexes from there?
+    # Useful classes are: A, C, G, T and N (except N is converted to PAD token)
+    useful_class_idx = [CADUCEUS_PAD_TOKEN_ID, 10, 9, 8, 7]
+    # mask out the V dimension to only consider useful classes
+    valid_cls_mask = torch.full(
+        (student_logits.size(-1),), device=student_logits.device, fill_value=False
+    )
+    valid_cls_mask[useful_class_idx] = True
+
     # Soft loss (distillation)
-    teacher_log_probs = F.log_softmax(teacher_logits / temperature, dim=-1)
-    student_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
+    teacher_log_probs = F.log_softmax(
+        teacher_logits[:, valid_cls_mask] / temperature, dim=-1
+    )
+    student_log_probs = F.log_softmax(
+        student_logits[:, valid_cls_mask] / temperature, dim=-1
+    )
 
     # NOTE: `batchmean` is required per pytorch docs: https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.kl_div.html
     soft_loss = F.kl_div(
