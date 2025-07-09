@@ -1,9 +1,8 @@
-import argparse
 import logging
 import multiprocessing
 from datetime import UTC, datetime
 from functools import partial
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import fsspec
 import lightning as L
@@ -19,6 +18,8 @@ from lightning.pytorch.utilities.types import (
 )
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoConfig, AutoModelForMaskedLM
+
+from caduceus_distill.utils import setup_basic_logging
 
 CADUCEUS_PAD_TOKEN_ID = 4
 
@@ -401,113 +402,95 @@ class StudentCaduceus(L.LightningModule):
         return optimizer
 
 
-def main() -> None:
+import typer
+
+
+def main(
+    zarr_path_train: Annotated[
+        str, typer.Argument(help="Path to the train split Zarr store with soft labels")
+    ],
+    zarr_path_val: Annotated[
+        str,
+        typer.Argument(help="Path to the validation split Zarr store with soft labels"),
+    ],
+    max_epoch: Annotated[int, typer.Option(help="Trainer max epochs", min=1)] = 1,
+    max_train_batches: Annotated[
+        int, typer.Option(help="Limit train batches per epoch (defaults to all)", min=1)
+    ] = 60_000,
+    max_val_batches: Annotated[
+        int,
+        typer.Option(
+            help="Limit validation batches during training (defaults to 128)", min=1
+        ),
+    ] = 128,
+    max_final_val_batches: Annotated[
+        int,
+        typer.Option(help="Limit final validation batches (defaults to 1024)", min=1),
+    ] = 1024,
+    val_check_interval: Annotated[
+        int,
+        typer.Option(
+            help="Used to compute validation schedule, validation schedule is logarithmic with this interval",
+            min=1,
+        ),
+    ] = 50,
+    val_log_interval_sampling: Annotated[
+        bool,
+        typer.Option(
+            "--val-log-interval-sampling",
+            help="Validate linearly in log space",
+        ),
+    ] = False,
+    batch_size: Annotated[int, typer.Option(help="Batch size", min=1)] = 1,
+    lr: Annotated[float, typer.Option(help="Learning rate")] = 1e-3,
+    temperature: Annotated[float, typer.Option(help="Distillation temperature")] = 4.0,
+    alpha: Annotated[
+        float,
+        typer.Option(
+            help="Weight for distillation soft targets loss (1 - alpha for hard targets loss)",
+        ),
+    ] = 0.8,
+    num_workers: Annotated[
+        int, typer.Option(help="Number of data loading workers")
+    ] = 4,
+    project_name: Annotated[
+        str, typer.Option(help="W&B project name")
+    ] = "caduceus_distill",
+    run_name_suffix: Annotated[
+        str, typer.Option(help="Optional suffix to append to run name")
+    ] = "",
+    accumulate_grad_batches: Annotated[
+        int,
+        typer.Option(
+            help="Number of batches to accumulate gradients over (default: 1, no accumulation)",
+        ),
+    ] = 1,
+    no_wandb: Annotated[
+        bool, typer.Option("--no-wandb", help="Disable W&B logging")
+    ] = False,
+    cosine_anneal: Annotated[
+        bool,
+        typer.Option(
+            "--cosine_anneal", help="Use cosine annealing for learning rate scheduling"
+        ),
+    ] = False,
+    gcs_bucket: Annotated[
+        str, typer.Option(help="GCS bucket name (e.g. for checkpoints)")
+    ] = "cadu-distill",
+) -> None:
     L.seed_everything(42, workers=True)
 
-    parser = argparse.ArgumentParser(
-        description="Distill Caduceus model using soft labels"
-    )
-    parser.add_argument(
-        "zarr_path_train",
-        type=str,
-        help="Path to the train split Zarr store with soft labels",
-    )
-    parser.add_argument(
-        "zarr_path_val",
-        type=str,
-        help="Path to the validation split Zarr store with soft labels",
-    )
-    parser.add_argument("--max_epoch", type=int, default=1, help="Trainer max epochs")
-    parser.add_argument(
-        "--max_train_batches",
-        type=int,
-        # NOTE: this is based on the scaling laws. The teacher was trained on 400k batches, student is about
-        # 15% of the teacher --> 60k batches.
-        default=60_000,
-        help="Limit train batches per epoch (defaults to all)",
-    )
-    parser.add_argument(
-        "--max_val_batches",
-        type=int,
-        default=128,
-        help="Limit validation batches during training (defaults to 128)",
-    )
-    parser.add_argument(
-        "--max_final_val_batches",
-        type=int,
-        default=1024,
-        help="Limit final validation batches (defaults to 1024).",
-    )
-    parser.add_argument(
-        "--val_check_interval",
-        type=int,
-        default=50,
-        help="Used to compute validation schedule, validation schedule is logarithmic with this interval",
-    )
-    parser.add_argument(
-        "--val_log_interval_sampling",
-        action="store_true",
-        help="If true validation will log linearly in log space",
-    )
-    parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
-    parser.add_argument(
-        "--temperature", type=float, default=4.0, help="Distillation temperature"
-    )
-    parser.add_argument(
-        "--alpha",
-        type=float,
-        default=0.8,
-        help="Weight for distillation soft targets loss (1 - alpha for hard targets loss)",
-    )
-    parser.add_argument(
-        "--num_workers", type=int, default=4, help="Number of data loading workers"
-    )
-    parser.add_argument(
-        "--project_name",
-        type=str,
-        default="caduceus_distill",
-        help="W&B project name",
-    )
-    parser.add_argument(
-        "--run_name_suffix",
-        type=str,
-        default="",
-        help="Optional suffix to append to run name",
-    )
-    parser.add_argument(
-        "--accumulate_grad_batches",
-        type=int,
-        default=1,
-        help="Number of batches to accumulate gradients over (default: 1, no accumulation)",
-    )
-    parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
-    parser.add_argument(
-        "--cosine_anneal",
-        action="store_true",
-        help="Use cosine annealing for learning rate scheduling",
-    )
-    parser.add_argument(
-        "--gcs-bucket",
-        type=str,
-        default="cadu-distill",
-        help="GCS bucket name (e.g. for checkpoints)",
-    )
-
-    args = parser.parse_args()
-    gcs_bucket = args.gcs_bucket
-
     # Initialize datasets
-    train_dataset = DistillationDataset(args.zarr_path_train)
-    val_dataset = DistillationDataset(args.zarr_path_val)
+    train_dataset = DistillationDataset(zarr_path_train)
+    val_dataset = DistillationDataset(zarr_path_val)
 
     # Create data loaders
     train_loader, val_loader, test_loader = [
         DataLoader(
             ds,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            persistent_workers=True if args.num_workers > 0 else False,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            persistent_workers=True if num_workers > 0 else False,
             pin_memory=True,
         )
         for ds in [train_dataset, val_dataset, val_dataset]
@@ -515,10 +498,10 @@ def main() -> None:
 
     # Initialize model
     model = StudentCaduceus(
-        lr=args.lr,
-        temperature=args.temperature,
-        alpha=args.alpha,
-        cosine_anneal=args.cosine_anneal,
+        lr=lr,
+        temperature=temperature,
+        alpha=alpha,
+        cosine_anneal=cosine_anneal,
     )
 
     # Setup logger
@@ -526,13 +509,13 @@ def main() -> None:
 
     datetime_str = datetime.now(UTC).strftime("%Y%m%d_%H%M")
     run_name_parts = [datetime_str]
-    if args.run_name_suffix:
-        run_name_parts.append(args.run_name_suffix)
+    if run_name_suffix:
+        run_name_parts.append(run_name_suffix)
     full_run_name = "_".join(run_name_parts)
     logger.info(f"Run name: {full_run_name}")
 
-    if not args.no_wandb:
-        wandb_logger = WandbLogger(project=args.project_name, name=full_run_name)
+    if not no_wandb:
+        wandb_logger = WandbLogger(project=project_name, name=full_run_name)
 
     try:
         from gcsfs import GCSFileSystem
@@ -550,7 +533,6 @@ def main() -> None:
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_dirpath,
         filename="student-caduceus__epoch={epoch:02d}__val_loss_total={val/loss/total:.3f}__step={step}",
-        # NOTE: because the metric contains slashes
         auto_insert_metric_name=False,
         monitor="val/loss/total",
         mode="min",
@@ -574,10 +556,7 @@ def main() -> None:
         print("INFO: No GPU available. Using '32-true' precision on CPU.")
 
     # Compute the validation schedule
-    if args.val_log_interval_sampling:
-        max_train_batches = args.max_train_batches
-        accumulate_grad_batches = args.accumulate_grad_batches
-        val_check_interval = args.val_check_interval
+    if val_log_interval_sampling:
         max_global_step = int(np.ceil(max_train_batches / accumulate_grad_batches))
         val_schedule = set(
             np.logspace(
@@ -588,10 +567,6 @@ def main() -> None:
             )
         )
     else:
-        # Linear schedule
-        max_train_batches = args.max_train_batches
-        accumulate_grad_batches = args.accumulate_grad_batches
-        val_check_interval = args.val_check_interval
         max_global_step = int(np.ceil(max_train_batches / accumulate_grad_batches))
         val_schedule = set(range(0, max_global_step, val_check_interval))
 
@@ -601,7 +576,7 @@ def main() -> None:
 
     # Initialize trainer
     trainer = L.Trainer(
-        max_epochs=args.max_epoch,
+        max_epochs=max_epoch,
         precision=precision,
         gradient_clip_val=1.0,
         log_every_n_steps=1,
@@ -615,30 +590,29 @@ def main() -> None:
         accelerator="auto",
         devices="auto",
         limit_train_batches=max_train_batches,
-        # Validation settings
         val_check_interval=val_check_interval,
         check_val_every_n_epoch=1,
-        limit_val_batches=args.max_val_batches,
-        limit_test_batches=args.max_final_val_batches,
+        limit_val_batches=max_val_batches,
+        limit_test_batches=max_final_val_batches,
         accumulate_grad_batches=accumulate_grad_batches,
     )
     if wandb_logger is not None:
         wandb_logger.log_hyperparams(
             {
-                "batch_size": args.batch_size,
+                "batch_size": batch_size,
                 "accumulate_grad_batches": accumulate_grad_batches,
-                "learning_rate": args.lr,
-                "temperature": args.temperature,
-                "alpha": args.alpha,
-                "max_epochs": args.max_epoch,
+                "learning_rate": lr,
+                "temperature": temperature,
+                "alpha": alpha,
+                "max_epochs": max_epoch,
                 "max_train_batches": max_train_batches,
-                "max_val_batches": args.max_val_batches,
-                "max_final_val_batches": args.max_final_val_batches,
-                "num_workers": args.num_workers,
+                "max_val_batches": max_val_batches,
+                "max_final_val_batches": max_final_val_batches,
+                "num_workers": num_workers,
                 "val_check_interval": val_check_interval,
-                "val_log_interval_sampling": args.val_log_interval_sampling,
+                "val_log_interval_sampling": val_log_interval_sampling,
                 "precision": precision,
-                "cosine_anneal": args.cosine_anneal,
+                "cosine_anneal": cosine_anneal,
             }
         )
 
@@ -648,11 +622,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
+    setup_basic_logging()
     # Set start method to 'spawn' to prevent fork-safety issues with
     # multi-threaded libraries (e.g. zarr) in worker processes.
     multiprocessing.set_start_method("spawn")
-    main()
+    typer.run(main)
