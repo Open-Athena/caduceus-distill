@@ -25,6 +25,10 @@ dependencies = [
     "typer>=0.16.0",
 ]
 
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project.optional-dependencies]
 mamba = ["mamba-ssm==1.2.0.post1"]
 
