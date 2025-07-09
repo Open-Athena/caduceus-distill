@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from src.caduceus_distillation import (
+from caduceus_distill.distill import (
     CADUCEUS_PAD_TOKEN_ID,
     _filter_non_specific_nucleotides_and_batch,
     distillation_loss,

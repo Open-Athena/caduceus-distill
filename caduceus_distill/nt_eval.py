@@ -24,7 +24,7 @@ from transformers import (
     PreTrainedTokenizer,
 )
 
-from src.caduceus_distillation import StudentCaduceus
+from caduceus_distill.distill import StudentCaduceus
 
 logger = logging.getLogger(__name__)
 
