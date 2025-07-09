@@ -19,7 +19,7 @@ from lightning.pytorch.utilities.types import (
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoConfig, AutoModelForMaskedLM
 
-from caduceus_distill.utils import setup_basic_logging
+from caduceus_distill.utils.utils import setup_basic_logging
 
 CADUCEUS_PAD_TOKEN_ID = 4
 
