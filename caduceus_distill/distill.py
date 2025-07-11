@@ -617,6 +617,7 @@ def main(
                 "cosine_anneal": cosine_anneal,
             }
         )
+        wandb_logger.watch(model=model, log="all", log_freq=val_check_interval)
 
     # Train model
     trainer.fit(model, train_loader, val_loader)
