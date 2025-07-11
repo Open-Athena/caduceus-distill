@@ -233,6 +233,7 @@ class GradientNormLogger(CallbackWithExplicitSchedule):
 
             if metric_prefix:
                 grad_norm = param.grad.norm(2)
+                weight_norm = param.data.norm(2)
                 data_std = param.data.std()
                 update_ratio = torch.tensor(
                     0.0, device=param.device
@@ -244,6 +245,7 @@ class GradientNormLogger(CallbackWithExplicitSchedule):
                     {
                         f"{metric_prefix}/grad_norm": grad_norm,
                         f"{metric_prefix}/update_ratio": update_ratio,
+                        f"{metric_prefix}/weight_norm": weight_norm,
                     }
                 )
 
