@@ -48,9 +48,17 @@ def test_temperature_scaling(basic_inputs):
     loss_low_temp, _, _ = distillation_loss(
         student, teacher, targets, temperature=small_temp, alpha=1.0
     )
+
+    useful_class_idx = [CADUCEUS_PAD_TOKEN_ID, 10, 9, 8, 7]
+    mask = torch.full((teacher.size(-1),), fill_value=False)
+    mask[useful_class_idx] = True
+    masked_teacher = teacher.masked_fill(~mask, float("-inf"))
+
     hard_loss = F.cross_entropy(
-        (student / small_temp).view(-1, student.size(-1)),
-        torch.argmax(teacher, dim=-1).view(-1),
+        (student.masked_fill(~mask, float("-inf")) / small_temp).view(
+            -1, student.size(-1)
+        ),
+        torch.argmax(masked_teacher, dim=-1).view(-1),
     )
     assert torch.isclose(loss_low_temp, hard_loss)
 
