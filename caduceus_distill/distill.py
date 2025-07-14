@@ -137,9 +137,11 @@ class DistillationDataset(Dataset[EXAMPLE_T]):
     def __init__(
         self,
         zarr_path: str,
+        skip_batches: list[int] | None = None,
     ) -> None:
         self.zarr_path = zarr_path
         self.ds: xr.Dataset | None = None
+        self.skip_batches = skip_batches
 
         with self.__maybe_open_zarr() as temp_ds:
             total_samples = len(temp_ds.sample)
@@ -175,6 +177,11 @@ class DistillationDataset(Dataset[EXAMPLE_T]):
         return self._len
 
     def __getitem__(self, idx: int) -> EXAMPLE_T:
+        # TODO: better doc, is there an idiomatic way to skip a batch?
+        if self.skip_batches and idx in self.skip_batches:
+            # NOTE: for now just use the last sample
+            idx = -1
+
         self.ds = self.__maybe_open_zarr()
         sample = self.ds.isel(sample=idx)
         input_ids = torch.tensor(sample.input_ids.values, dtype=torch.long)
@@ -518,7 +525,7 @@ def main(
     L.seed_everything(42, workers=True)
 
     # Initialize datasets
-    train_dataset = DistillationDataset(zarr_path_train)
+    train_dataset = DistillationDataset(zarr_path_train, skip_batches=[4297])
     val_dataset = DistillationDataset(zarr_path_val)
 
     # Create data loaders
