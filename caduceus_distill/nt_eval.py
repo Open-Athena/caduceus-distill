@@ -189,6 +189,11 @@ def load_caduceus(
     else:
         model = StudentCaduceus.load_from_checkpoint(model_to_load)
 
+    # NOTE: this is really necessary just for the model loaded from a checkpoint,
+    # but it doesn't hurt to do it for all models.
+    model.eval()
+    assert model.training is False, "Model should be in inference mode"
+
     num_gpus = torch.cuda.device_count()
     # Sequential warm-up to prevent a race condition in the Triton kernel autotuner.
     # This is necessary when using nn.DataParallel with models that use Triton JIT,
