@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import Annotated, Any, Literal
 
-import fsspec
 import lightning as L
 import numpy as np
 import torch
@@ -561,21 +560,21 @@ def main(
     if not no_wandb:
         wandb_logger = WandbLogger(project=project_name, name=full_run_name)
 
-    try:
-        from gcsfs import GCSFileSystem
+    # try:
+    #     from gcsfs import GCSFileSystem
 
-        fs: GCSFileSystem = fsspec.filesystem("gs")
-        assert len(fs.info(f"gs://{gcs_bucket}")) > 0
-        checkpoint_dirpath = f"gs://{gcs_bucket}/checkpoints/{full_run_name}/"
-    except Exception:
-        logger.exception(
-            "Failed to probe GCS, will use local filesystem for checkpoints."
-        )
-        checkpoint_dirpath = f"checkpoints/{full_run_name}/"
+    #     fs: GCSFileSystem = fsspec.filesystem("gs")
+    #     assert len(fs.info(f"gs://{gcs_bucket}")) > 0
+    #     checkpoint_dirpath = f"gs://{gcs_bucket}/checkpoints/{full_run_name}/"
+    # except Exception:
+    #     logger.exception(
+    #         "Failed to probe GCS, will use local filesystem for checkpoints."
+    #     )
+    #     checkpoint_dirpath = f"checkpoints/{full_run_name}/"
 
-    logger.info(f"Checkpoint directory: {checkpoint_dirpath}")
+    # logger.info(f"Checkpoint directory: {checkpoint_dirpath}")
     checkpoint_callback = ModelCheckpoint(
-        dirpath=checkpoint_dirpath,
+        dirpath="./checkpoints",
         filename="student-caduceus__epoch={epoch:02d}__val_loss_total={val/loss/total:.3f}__step={step}",
         auto_insert_metric_name=False,
         monitor="val/loss/total",
