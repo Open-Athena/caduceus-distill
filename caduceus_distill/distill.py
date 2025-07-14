@@ -1,5 +1,6 @@
 import logging
 import multiprocessing
+import os
 from datetime import UTC, datetime
 from functools import partial
 from typing import Annotated, Any, Literal
@@ -140,18 +141,41 @@ class DistillationDataset(Dataset[EXAMPLE_T]):
         self.zarr_path = zarr_path
         self.ds: xr.Dataset | None = None
 
-        with xr.open_zarr(self.zarr_path, chunks=None) as temp_ds:
+        with self.__maybe_open_zarr() as temp_ds:
             total_samples = len(temp_ds.sample)
 
             self._len = total_samples
+
+    def __maybe_open_zarr(self) -> xr.Dataset:
+        if self.ds is None:
+            if self.zarr_path.startswith("r2://"):
+                s3_auth_key = os.getenv("R2_AUTH_KEY")
+                s3_auth_secret = os.getenv("R2_AUTH_SECRET")
+                s3_host = os.getenv("R2_ACCOUNT_ID")
+                if not (s3_auth_key and s3_auth_secret and s3_host):
+                    raise ValueError(
+                        "R2 credentials (R2_AUTH_KEY, R2_AUTH_SECRET, R2_ACCOUNT_ID) must be set in environment variables."
+                    )
+                self.ds = xr.open_zarr(
+                    self.zarr_path.replace("r2://", "s3://"),
+                    storage_options={
+                        "key": s3_auth_key,
+                        "secret": s3_auth_secret,
+                        "client_kwargs": {
+                            "endpoint_url": f"https://{s3_host}.r2.cloudflarestorage.com"
+                        },
+                    },
+                    chunks=None,
+                )
+            else:
+                self.ds = xr.open_zarr(self.zarr_path, chunks=None)
+        return self.ds
 
     def __len__(self) -> int:
         return self._len
 
     def __getitem__(self, idx: int) -> EXAMPLE_T:
-        if self.ds is None:
-            self.ds = xr.open_zarr(self.zarr_path, chunks=None)
-
+        self.ds = self.__maybe_open_zarr()
         sample = self.ds.isel(sample=idx)
         input_ids = torch.tensor(sample.input_ids.values, dtype=torch.long)
 

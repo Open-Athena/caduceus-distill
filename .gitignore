@@ -2,6 +2,7 @@
 .local/
 checkpoints/
 wandb/
+.env
 
 # Python-generated files
 __pycache__/
