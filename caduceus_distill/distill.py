@@ -3,9 +3,9 @@ import multiprocessing
 import os
 from datetime import UTC, datetime
 from functools import partial
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
-import fsspec
 import lightning as L
 import numpy as np
 import torch
@@ -513,9 +513,12 @@ def main(
             "--cosine_anneal", help="Use cosine annealing for learning rate scheduling"
         ),
     ] = False,
-    gcs_bucket: Annotated[
-        str, typer.Option(help="GCS bucket name (e.g. for checkpoints)")
-    ] = "cadu-distill",
+    checkpoint_dirpath: Annotated[
+        str | None,
+        typer.Option(
+            help="Path to the checkpoint directory, this can be local or ffspec compatible path"
+        ),
+    ] = None,
 ) -> None:
     L.seed_everything(42, workers=True)
 
@@ -556,19 +559,14 @@ def main(
     if not no_wandb:
         wandb_logger = WandbLogger(project=project_name, name=full_run_name)
 
-    try:
-        from gcsfs import GCSFileSystem
-
-        fs: GCSFileSystem = fsspec.filesystem("gs")
-        assert len(fs.info(f"gs://{gcs_bucket}")) > 0
-        checkpoint_dirpath = f"gs://{gcs_bucket}/checkpoints/{full_run_name}/"
-    except Exception:
-        logger.exception(
-            "Failed to probe GCS, will use local filesystem for checkpoints."
-        )
+    if checkpoint_dirpath is not None:
+        checkpoint_dirpath = f"{checkpoint_dirpath}/{full_run_name}/"
+    else:
         checkpoint_dirpath = f"checkpoints/{full_run_name}/"
+        Path(checkpoint_dirpath).mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Checkpoint directory: {checkpoint_dirpath}")
+    logger.info(f"Using checkpoint directory: {checkpoint_dirpath}")
+
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_dirpath,
         filename="student-caduceus__epoch={epoch:02d}__val_loss_total={val/loss/total:.3f}__step={step}",
