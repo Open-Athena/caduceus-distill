@@ -21,6 +21,7 @@ dependencies = [
     "gcsfs>=2025.3.0",
     "universal-pathlib>=0.2.6",
     "typer>=0.16.0",
+    "s3fs>=2025.3.0",
 ]
 
 [build-system]
