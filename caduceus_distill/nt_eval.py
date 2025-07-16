@@ -75,12 +75,18 @@ def main(
 
     if not features_path.exists():
         logger.info(f"Creating features at {features_path}")
-        features = create_features(
+
+        model, tokenizer = load_caduceus(
             model_to_load=model_to_load,
+            disable_fused_add_norm=disable_fused_add_norm,
+        )
+
+        features = create_features(
+            model=model,
+            tokenizer=tokenizer,
             task_group=task_group,
             chunk_size=chunk_size,
             sample_limit=sample_limit,
-            disable_fused_add_norm=disable_fused_add_norm,
             task_limit=task_limit,
         )
         features.to_zarr(features_path.as_posix())
@@ -162,14 +168,12 @@ def load_nt_dataset(task_name: str) -> Dataset:
 
 
 def load_caduceus(
-    *, num_labels: int, model_to_load: str, disable_fused_add_norm: bool = True
+    *, model_to_load: str, disable_fused_add_norm: bool = True
 ) -> tuple[nn.Module, PreTrainedTokenizer]:  # noqa
     # See https://github.com/m42-health/gfm-random-eval/blob/575ceab00f841f2cd7f6e23810508829835871ea/nt_benchmark/models.py#L55
     model_name = "kuleshov-group/caduceus-ps_seqlen-131k_d_model-256_n_layer-16"
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
-    # TODO (rav): what is the purpose of this attribute, I don't think this has any impact
-    model_config.num_labels = num_labels
     # This is a modification from the paper to see what happens if this option is NOT overridden;
     # critically, it changes the graph and does not use all pre-trained weights.  Here is the warning
     # you get when this is enabled (there is no warning when it is disabled):
@@ -270,11 +274,11 @@ TASK_GROUPS = {
 
 def create_features(
     *,
-    model_to_load: str,
+    model: nn.Module,
+    tokenizer: PreTrainedTokenizer,
     task_group: str,
     chunk_size: int,
     sample_limit: int,
-    disable_fused_add_norm: bool,
     task_limit: int | None = None,
 ) -> xr.Dataset:
     datasets = []
@@ -287,12 +291,6 @@ def create_features(
         logger.info(f"Loading task {task_name}")
         try:
             dataset = load_nt_dataset(task_name)
-            num_labels = len(set(dataset["train"]["label"]))
-            model, tokenizer = load_caduceus(
-                num_labels=num_labels,
-                model_to_load=model_to_load,
-                disable_fused_add_norm=disable_fused_add_norm,
-            )
             for split in ["train", "test"]:
                 ds = create_modeling_dataset(
                     chunk_size=chunk_size,
@@ -309,7 +307,6 @@ def create_features(
         except Exception:
             logger.exception(f"Failed to create features for task {task_name}")
     features = xr.concat(datasets, dim="samples")
-    features = features.assign_attrs({"num_labels": num_labels})
     return features
 
 
@@ -355,7 +352,9 @@ def create_modeling_dataset(
     )
 
 
-def run_modeling(features: xr.Dataset, seed: int = 0) -> pd.DataFrame:
+def run_modeling(
+    features: xr.Dataset, seed: int = 0, gbrt_only: bool = False
+) -> pd.DataFrame:
     task_names = features.task_name.to_series().drop_duplicates().to_list()
     results = []
     for task_name in tqdm.tqdm(task_names, desc="Running models"):
@@ -390,13 +389,12 @@ def run_modeling(features: xr.Dataset, seed: int = 0) -> pd.DataFrame:
         else:
             logger.info("Using HistGradientBoostingClassifier for gradient boosting")
             gbrt = HistGradientBoostingClassifier(random_state=seed)
-        models = {
-            "lreg": make_pipeline(
+        models = {"gbrt": gbrt}
+        if not gbrt_only:
+            models["lreg"] = make_pipeline(
                 StandardScaler(),
                 LogisticRegressionCV(cv=5, max_iter=1000, random_state=seed),
-            ),
-            "gbrt": gbrt,
-        }
+            )
 
         for model_name, model in models.items():
             logger.info(f"Training {task_name=}, {model_name=}...")
