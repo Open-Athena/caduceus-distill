@@ -39,6 +39,8 @@ def generate_soft_labels(
     # Load the model initially to CPU. This is important for the sequential warm-up.
     model = AutoModelForMaskedLM.from_pretrained(model_name, trust_remote_code=True)
 
+    assert model.training is False, "The model should be in eval mode for inference"
+
     if device == "cuda" and torch.cuda.is_available():
         num_gpus = torch.cuda.device_count()
         if num_gpus > 1:
