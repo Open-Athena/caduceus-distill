@@ -98,6 +98,9 @@ def distillation_loss(
         (student_logits.size(-1),), device=student_logits.device, fill_value=False
     )
     valid_cls_mask[useful_class_idx] = True
+    # NOTE: this impact the cross_entropy below, but not the KL divergence since we nuke
+    # the logits for non-useful classes there.
+    student_logits = student_logits.masked_fill(~valid_cls_mask, float("-inf"))
 
     # Soft loss (distillation)
     teacher_log_probs = F.log_softmax(
