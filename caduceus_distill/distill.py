@@ -10,6 +10,7 @@ import lightning as L
 import numpy as np
 import torch
 import torch.nn.functional as F
+import typer
 import xarray as xr
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
@@ -18,7 +19,7 @@ from lightning.pytorch.utilities.types import (
     OptimizerLRSchedulerConfig,
 )
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoConfig, AutoModelForMaskedLM
+from transformers import AutoConfig, AutoModelForMaskedLM, AutoTokenizer
 
 from caduceus_distill.utils.utils import setup_basic_logging
 
@@ -345,6 +346,9 @@ class StudentCaduceus(L.LightningModule):
         self.student = AutoModelForMaskedLM.from_config(
             student_config, trust_remote_code=True
         )
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            teacher_model_name, trust_remote_code=True
+        )
         self.temperature = temperature
         self.lr = lr
         self.alpha = alpha
@@ -436,6 +440,38 @@ class StudentCaduceus(L.LightningModule):
     def validation_step(self, batch: EXAMPLE_T, batch_idx: int) -> torch.Tensor:
         return self._base_validation_step(batch, batch_idx, is_final_val=False)
 
+    def _run_nt_evaluation(self) -> None:
+        from caduceus_distill.nt_eval import create_features, run_modeling
+
+        assert (
+            not self.training
+        ), "The model is expected to be in eval mode for NT evaluation"
+
+        features = create_features(
+            model=self,
+            tokenizer=self.tokenizer,
+            task_group="eric_relevant",
+            chunk_size=100,
+            sample_limit=10_000,
+        )
+
+        results = run_modeling(features, gbrt_only=True)
+        results = results.query("split == 'test' & metric in ('roc_auc', 'f1')")
+
+        metrics_to_log: dict[str, float] = {}
+        for r in results.itertuples():
+            metrics_to_log[f"nt_eval/{r.task_name}/{r.metric}"] = (
+                r.value  # type:ignore[assignment]
+            )
+
+        self.log_dict(metrics_to_log)
+
+    def on_validation_epoch_start(self) -> None:
+        return self._run_nt_evaluation()
+
+    def on_test_epoch_start(self) -> None:
+        return self._run_nt_evaluation()
+
     def test_step(self, batch: EXAMPLE_T, batch_idx: int) -> torch.Tensor:
         """
         Test step is used for final validation after training.
@@ -459,9 +495,6 @@ class StudentCaduceus(L.LightningModule):
                 },
             }
         return optimizer
-
-
-import typer
 
 
 def main(
