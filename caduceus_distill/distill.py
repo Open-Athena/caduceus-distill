@@ -1,17 +1,16 @@
 import logging
 import multiprocessing
-import os
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+import fsspec
 import lightning as L
 import numpy as np
 import torch
 import torch.nn.functional as F
 import typer
-import xarray as xr
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities.types import (
@@ -19,9 +18,15 @@ from lightning.pytorch.utilities.types import (
     OptimizerLRSchedulerConfig,
 )
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoConfig, AutoModelForMaskedLM, AutoTokenizer
+from transformers import (
+    AutoConfig,
+    AutoModelForMaskedLM,
+    AutoTokenizer,
+    PreTrainedTokenizerBase,
+)
 
-from caduceus_distill.utils.utils import setup_basic_logging
+from caduceus_distill.data.hg38_dataset import HG38_EXAMPLE_T, HG38Dataset
+from caduceus_distill.utils.utils import get_root_path, setup_basic_logging
 
 CADUCEUS_PAD_TOKEN_ID = 4
 
@@ -31,58 +36,80 @@ logger = logging.getLogger(__name__)
 def _filter_non_specific_nucleotides_and_batch(
     student_logits: torch.Tensor,
     teacher_logits: torch.Tensor,
+    student_emb: torch.Tensor,
+    teacher_emb: torch.Tensor,
     input_ids: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    This function filters out the examples where the label is the non-specific nucleotide (PAD token).
+    """
     mask = input_ids != CADUCEUS_PAD_TOKEN_ID
     # 2d mask is going to collapses some dimensions
     student_logits = student_logits[mask]
     teacher_logits = teacher_logits[mask]
     input_ids = input_ids[mask]
+    student_emb = student_emb[mask]
+    teacher_emb = teacher_emb[mask]
 
     assert student_logits.ndim == 2
     assert teacher_logits.ndim == 2
+    assert student_emb.ndim == 2
+    assert teacher_emb.ndim == 2
     assert input_ids.ndim == 1
 
-    return student_logits, teacher_logits, input_ids
+    return student_logits, teacher_logits, student_emb, teacher_emb, input_ids
 
 
 def distillation_loss(
+    *,
     student_logits: torch.Tensor,
     teacher_logits: torch.Tensor,
+    student_emb: torch.Tensor,
+    teacher_emb: torch.Tensor,
     input_ids: torch.Tensor,
-    *,
-    temperature: float = 4.0,
-    alpha: float = 0.8,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    temperature: float,
+    alpha_soft: float,
+    alpha_sim: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Calculate combined distillation loss (KL divergence with temperature scaling + cross-entropy with hard targets).
+    Calculate combined distillation loss.
 
-    Args:
+    Parameters:
         student_logits: Raw logits from student model [B, T, V]
         teacher_logits: Raw logits from teacher model [B, T, V]
+        student_emb: Hidden states from student model [B, T, D]
+        teacher_emb: Hidden states from teacher model [B, T, D]
         input_ids: Ground truth token ids (hard targets) [B, T]
         temperature: Temperature for softening probability distributions
-        alpha: Weight for distillation loss (1-alpha for hard loss)
-
-    Returns:
-        Weighted sum of distillation and hard target loss
+        alpha_soft: Weight for soft targets loss (KL divergence)
+        alpha_sim: Weight for hidden state similarity loss (cosine embedding loss)
     """
     assert temperature > 0, "Temperature must be positive"
-    assert 0 <= alpha <= 1, "Alpha must be in [0, 1]"
+    assert 0 <= alpha_soft <= 1, "alpha_soft must be in [0, 1]"
+    alpha_hard = 1.0 - alpha_soft
 
     # NOTE: we could easily make this function work on any number of dimensions, but for simplicity and to make it
     # fail quick if the shapes are wrong, we assume 3d input [B, T, V] for logits and [B, T] for input_ids.
     assert (
         student_logits.ndim == 3
     ), f"Expected student_logits to be 3D, got {student_logits.ndim}D"
+
     assert (
         teacher_logits.ndim == 3
     ), f"Expected teacher_logits to be 3D, got {teacher_logits.ndim}D"
     assert input_ids.ndim == 2, f"Expected input_ids to be 2D, got {input_ids.ndim}D"
 
-    student_logits, teacher_logits, input_ids = (
+    # Expect B, T, D
+    assert (
+        student_emb.ndim == 3
+    ), f"Expected student_emb to be 3D, got {student_emb.ndim}D"
+    assert (
+        teacher_emb.ndim == 3
+    ), f"Expected teacher_emb to be 3D, got {teacher_emb.ndim}D"
+
+    student_logits, teacher_logits, student_emb, teacher_emb, input_ids = (
         _filter_non_specific_nucleotides_and_batch(
-            student_logits, teacher_logits, input_ids
+            student_logits, teacher_logits, student_emb, teacher_emb, input_ids
         )
     )
 
@@ -123,62 +150,68 @@ def distillation_loss(
     # > to multiply them by T^2 when using both hard and soft targets. This ensures that the relative
     # > contributions of the hard and soft targets remain roughly unchanged if the temperature used for
     # > distillation is changed while experimenting with meta-parameters.
-    if alpha != 1.0:
+    if alpha_soft != 1.0:
         soft_loss *= temperature**2
 
     # Hard loss (cross-entropy)
     hard_loss = F.cross_entropy(student_logits, input_ids)
 
-    soft_loss_contrib = alpha * soft_loss
-    hard_loss_contrib = (1 - alpha) * hard_loss
-    total_loss = soft_loss_contrib + hard_loss_contrib
+    soft_loss_contrib = alpha_soft * soft_loss
+    hard_loss_contrib = alpha_hard * hard_loss
 
-    return total_loss, soft_loss_contrib, hard_loss_contrib
+    hidden_state_sim = F.cosine_embedding_loss(
+        student_emb,
+        teacher_emb,
+        torch.ones(
+            student_emb.size(0),
+            device=student_emb.device,
+        ),
+        reduction="mean",
+    )
+    hidden_state_sim = alpha_sim * hidden_state_sim
+
+    total_loss = soft_loss_contrib + hard_loss_contrib + hidden_state_sim
+    return total_loss, soft_loss_contrib, hard_loss_contrib, hidden_state_sim
 
 
-EXAMPLE_T = tuple[torch.Tensor, torch.Tensor]
-
-
-class DistillationDataset(Dataset[EXAMPLE_T]):
+class DistillationDataset(Dataset[HG38_EXAMPLE_T]):
     def __init__(
         self,
-        zarr_path: str,
+        bed_file: str,
+        fasta_file: str,
+        tokenizer: PreTrainedTokenizerBase,
+        seq_length: int = 2**17,
+        split: str = "train",
         skip_batches: set[int] | None = None,
+        start_idx: int = 0,
+        device: str = "cpu",
     ) -> None:
-        self.zarr_path = zarr_path
-        self.ds: xr.Dataset | None = None
+        self.hg38_ds: HG38Dataset | None = None
+        self.split = split
+        self.bed_file = bed_file
+        self.fasta_file = fasta_file
+        self.seq_length = seq_length
+        self.device = device
+        self.tokenizer = tokenizer
+
         self.skip_batches = skip_batches if skip_batches is not None else set()
-        self._in_memory_cache: dict[int, EXAMPLE_T] = {}
+        self._in_memory_cache: dict[int, HG38_EXAMPLE_T] = {}
+        self.start_idx = start_idx
 
-        with self.__maybe_open_zarr() as temp_ds:
-            total_samples = len(temp_ds.sample)
+        self._len = len(self.__maybe_open_ds())
 
-            self._len = total_samples
-
-    def __maybe_open_zarr(self) -> xr.Dataset:
-        if self.ds is None:
-            if self.zarr_path.startswith("r2://"):
-                s3_auth_key = os.getenv("R2_AUTH_KEY")
-                s3_auth_secret = os.getenv("R2_AUTH_SECRET")
-                s3_host = os.getenv("R2_ACCOUNT_ID")
-                if not (s3_auth_key and s3_auth_secret and s3_host):
-                    raise ValueError(
-                        "R2 credentials (R2_AUTH_KEY, R2_AUTH_SECRET, R2_ACCOUNT_ID) must be set in environment variables."
-                    )
-                self.ds = xr.open_zarr(
-                    self.zarr_path.replace("r2://", "s3://"),
-                    storage_options={
-                        "key": s3_auth_key,
-                        "secret": s3_auth_secret,
-                        "client_kwargs": {
-                            "endpoint_url": f"https://{s3_host}.r2.cloudflarestorage.com"
-                        },
-                    },
-                    chunks=None,
-                )
-            else:
-                self.ds = xr.open_zarr(self.zarr_path, chunks=None)
-        return self.ds
+    def __maybe_open_ds(self) -> HG38Dataset:
+        if self.hg38_ds is None:
+            hg38_ds = HG38Dataset(
+                split=self.split,
+                bed_file=self.bed_file,
+                fasta_file=self.fasta_file,
+                seq_length=self.seq_length,
+                tokenizer=self.tokenizer,
+            )
+        else:
+            hg38_ds = self.hg38_ds
+        return hg38_ds
 
     def __len__(self) -> int:
         return self._len
@@ -191,27 +224,37 @@ class DistillationDataset(Dataset[EXAMPLE_T]):
         for i in range(n):
             self._in_memory_cache[i] = self[i]
 
-    def __getitem__(self, idx: int) -> EXAMPLE_T:
+    def __getitem__(self, idx: int) -> HG38_EXAMPLE_T:
+        self.hg38_ds = self.__maybe_open_ds()
+        idx = idx + self.start_idx
+
         if idx in self._in_memory_cache:
             return self._in_memory_cache[idx]
 
         # TODO: better doc, is there an idiomatic way to skip a batch?
         if idx in self.skip_batches:
+            # NOTE: to keep things easy and safe - for now just use the 1st batch
             new_idx = np.random.randint(0, len(self))
             logger.debug(f"Using batch {new_idx} instead of {idx}")
             idx = new_idx
 
-        self.ds = self.__maybe_open_zarr()
-        sample = self.ds.isel(sample=idx)
-        input_ids = torch.tensor(sample.input_ids.values, dtype=torch.long)
+        input_ids, chr_name, start, end = self.hg38_ds[idx]
 
         if input_ids.eq(CADUCEUS_PAD_TOKEN_ID).all():
             raise ValueError(
                 f"Sample {idx} contains only PAD tokens. This is not allowed."
             )
 
-        teacher_logits = torch.tensor(sample.logits.values, dtype=torch.float32)
-        return input_ids, teacher_logits
+        return input_ids, chr_name, start, end
+
+    def __getstate__(self) -> dict[str, Any]:
+        r = super().__getstate__()
+        assert isinstance(r, dict)
+        # NOTE: never pickle the dataset
+        r["hg38_ds"] = None
+        return r
+
+    # TODO: add `load_state_dict` and `state_dict` methods to support pickling/checkpointing
 
 
 class CallbackWithExplicitSchedule(L.Callback):
@@ -315,16 +358,20 @@ class StudentCaduceus(L.LightningModule):
     student: AutoModelForMaskedLM
     temperature: float
     lr: float
-    alpha: float
+    alpha_soft: float
+    alpha_sim: float
     cosine_anneal: bool
 
     def __init__(
         self,
-        teacher_model_name: str = "kuleshov-group/caduceus-ps_seqlen-131k_d_model-256_n_layer-16",
+        *,
+        teacher_model_name: str,
         lr: float = 1e-3,
         temperature: float = 4.0,
-        alpha: float = 0.8,
+        alpha_soft: float = 0.8,
+        alpha_sim: float = 0.5,
         cosine_anneal: bool = False,
+        preload_teacher: bool = False,
     ) -> None:
         super().__init__()
         self.cosine_anneal = cosine_anneal
@@ -334,14 +381,14 @@ class StudentCaduceus(L.LightningModule):
         student_config = AutoConfig.from_pretrained(
             teacher_model_name,
             trust_remote_code=True,
-            d_model=128,  # Half of teacher's 256
+            d_model=256,  # Same as teacher's
             n_layer=8,  # Half of teacher's 16
         )
 
         # Verify student config parameters
         assert (
-            student_config.d_model == 128
-        ), f"Expected d_model=128, got {student_config.d_model}"
+            student_config.d_model == 256
+        ), f"Expected d_model=256, got {student_config.d_model}"
         assert (
             student_config.n_layer == 8
         ), f"Expected n_layer=8, got {student_config.n_layer}"
@@ -352,28 +399,46 @@ class StudentCaduceus(L.LightningModule):
         self.tokenizer = AutoTokenizer.from_pretrained(
             teacher_model_name, trust_remote_code=True
         )
+        if preload_teacher:
+            self.teacher = AutoModelForMaskedLM.from_pretrained(
+                teacher_model_name, trust_remote_code=True
+            )
+        else:
+            self.teacher = None
+
         self.temperature = temperature
         self.lr = lr
-        self.alpha = alpha
+        self.alpha_soft = alpha_soft
+        self.alpha_sim = alpha_sim
 
     def forward(
         self, input_ids: torch.Tensor, output_hidden_states: bool = False
     ) -> Any:
         return self.student(input_ids, output_hidden_states=output_hidden_states)
 
-    def training_step(self, batch: EXAMPLE_T, batch_idx: int) -> torch.Tensor:
-        input_ids, teacher_logits = batch
+    def training_step(self, batch: HG38_EXAMPLE_T, batch_idx: int) -> torch.Tensor:
+        input_ids, chr_names, starts, ends = batch
+        logger.debug(f"Train {batch_idx=}, {chr_names=}, {starts=}, {ends=}")
 
-        outputs = self.student(input_ids)
+        with torch.no_grad():
+            outputs = self.teacher(input_ids.to(self.device), output_hidden_states=True)
+            teacher_logits = outputs.logits
+            teacher_emb = outputs.hidden_states[-1]
+
+        outputs = self.student(input_ids, output_hidden_states=True)
         student_logits = outputs.logits
+        student_emb = outputs.hidden_states[-1]
 
         # Calculate combined loss
-        loss, soft_loss, hard_loss = distillation_loss(
-            student_logits,
-            teacher_logits,
-            input_ids,
+        loss, soft_loss, hard_loss, hidden_state_sim_loss = distillation_loss(
+            student_logits=student_logits,
+            teacher_logits=teacher_logits,
+            student_emb=student_emb,
+            teacher_emb=teacher_emb,
+            input_ids=input_ids,
             temperature=self.temperature,
-            alpha=self.alpha,
+            alpha_soft=self.alpha_soft,
+            alpha_sim=self.alpha_sim,
         )
 
         self.log("train/loss/total", loss, on_step=True, on_epoch=True, prog_bar=True)
@@ -381,6 +446,7 @@ class StudentCaduceus(L.LightningModule):
             {
                 "train/loss/soft": soft_loss,
                 "train/loss/hard": hard_loss,
+                "train/loss/hidden_state_sim": hidden_state_sim_loss,
             },
             on_step=True,
             on_epoch=True,
@@ -389,25 +455,36 @@ class StudentCaduceus(L.LightningModule):
 
     def _base_validation_step(
         self,
-        batch: EXAMPLE_T,
+        batch: HG38_EXAMPLE_T,
         batch_idx: int,
         is_final_val: bool,
     ) -> torch.Tensor:
-        input_ids, teacher_logits = batch
+        input_ids, chr_names, starts, ends = batch
+        logger.debug(f"Validation {batch_idx=}, {chr_names=}, {starts=}, {ends=}")
 
-        outputs = self.student(input_ids)
+        outputs = self.student(input_ids, output_hidden_states=True)
         student_logits = outputs.logits
+        student_emb = outputs.hidden_states[-1]
+        with torch.no_grad():
+            outputs = self.teacher(input_ids.to(self.device), output_hidden_states=True)
+            teacher_logits = outputs.logits
+            teacher_emb = outputs.hidden_states[-1]
 
-        loss_eval, soft_loss_eval, hard_loss_eval = distillation_loss(
-            student_logits,
-            teacher_logits,
-            input_ids,
-            # The `temp` hyper-parameter should not affect the eval scoring
-            # Also, temp should be set to 1.0 after the distillation is complete (per Hinton)
-            temperature=1.0,
-            # The `alpha` hyper-parameter should not affect the eval scoring
-            # alpha=1.0 means that we only consider the soft targets
-            alpha=1.0,
+        loss_eval, soft_loss_eval, hard_loss_eval, hidden_state_sim_eval = (
+            distillation_loss(
+                student_logits=student_logits,
+                teacher_logits=teacher_logits,
+                student_emb=student_emb,
+                teacher_emb=teacher_emb,
+                input_ids=input_ids,
+                # The `temp` hyper-parameter should not affect the eval scoring
+                # Also, temp should be set to 1.0 after the distillation is complete (per Hinton)
+                temperature=1.0,
+                # The `alpha` hyper-parameter should not affect the eval scoring
+                # alpha=1.0 means that we only consider the soft targets
+                alpha_soft=1.0,
+                alpha_sim=0.0,
+            )
         )
 
         # Evaluation loss with training hyperparameters for comparison
@@ -415,12 +492,16 @@ class StudentCaduceus(L.LightningModule):
             loss_train_temp,
             soft_loss_train_temp,
             hard_loss_train_temp,
+            hidden_state_sim_train_temp,
         ) = distillation_loss(
-            student_logits,
-            teacher_logits,
-            input_ids,
+            student_logits=student_logits,
+            teacher_logits=teacher_logits,
+            student_emb=student_emb,
+            teacher_emb=teacher_emb,
+            input_ids=input_ids,
             temperature=self.temperature,
-            alpha=self.alpha,
+            alpha_soft=self.alpha_soft,
+            alpha_sim=self.alpha_sim,
         )
 
         # Use a different metric prefix for the final, post-fit validation run.
@@ -433,14 +514,16 @@ class StudentCaduceus(L.LightningModule):
         metrics_to_log = {
             f"{prefix}/loss/soft": soft_loss_eval,
             f"{prefix}/loss/hard": hard_loss_eval,
+            f"{prefix}/loss/hidden_state_sim": hidden_state_sim_eval,
             f"{prefix}/loss_train_temp/total": loss_train_temp,
             f"{prefix}/loss_train_temp/soft": soft_loss_train_temp,
             f"{prefix}/loss_train_temp/hard": hard_loss_train_temp,
+            f"{prefix}/loss_train_temp/hidden_state_sim": hidden_state_sim_train_temp,
         }
         self.log_dict(metrics_to_log, sync_dist=True)
         return loss_eval
 
-    def validation_step(self, batch: EXAMPLE_T, batch_idx: int) -> torch.Tensor:
+    def validation_step(self, batch: HG38_EXAMPLE_T, batch_idx: int) -> torch.Tensor:
         return self._base_validation_step(batch, batch_idx, is_final_val=False)
 
     def _run_nt_evaluation(self) -> None:
@@ -475,7 +558,7 @@ class StudentCaduceus(L.LightningModule):
     def on_test_epoch_start(self) -> None:
         return self._run_nt_evaluation()
 
-    def test_step(self, batch: EXAMPLE_T, batch_idx: int) -> torch.Tensor:
+    def test_step(self, batch: HG38_EXAMPLE_T, batch_idx: int) -> torch.Tensor:
         """
         Test step is used for final validation after training.
         It uses the same logic as validation_step but with final_val prefix.
@@ -501,13 +584,25 @@ class StudentCaduceus(L.LightningModule):
 
 
 def main(
-    zarr_path_train: Annotated[
-        str, typer.Argument(help="Path to the train split Zarr store with soft labels")
-    ],
-    zarr_path_val: Annotated[
-        str,
-        typer.Argument(help="Path to the validation split Zarr store with soft labels"),
-    ],
+    bed_file: Annotated[
+        str | None,
+        typer.Argument(
+            help="Path to the hg38 BED file. Default to data in `data/hg38/`."
+        ),
+    ] = None,
+    fasta_file: Annotated[
+        str | None,
+        typer.Argument(
+            help="Path to the hg38 FASTA file. Default to data in `data/hg38/`."
+        ),
+    ] = None,
+    seq_length: Annotated[
+        int,
+        typer.Option(
+            help="Nucleotide sequence length",
+        ),
+    ] = 2
+    ** 17,
     max_epoch: Annotated[int, typer.Option(help="Trainer max epochs", min=1)] = 1,
     max_train_batches: Annotated[
         int, typer.Option(help="Limit train batches per epoch (defaults to all)", min=1)
@@ -539,12 +634,18 @@ def main(
     batch_size: Annotated[int, typer.Option(help="Batch size", min=1)] = 1,
     lr: Annotated[float, typer.Option(help="Learning rate")] = 1e-3,
     temperature: Annotated[float, typer.Option(help="Distillation temperature")] = 4.0,
-    alpha: Annotated[
+    alpha_soft: Annotated[
         float,
         typer.Option(
-            help="Weight for distillation soft targets loss (1 - alpha for hard targets loss)",
+            help="Weight for distillation soft targets loss, must be between in [0, 1]",
         ),
     ] = 0.8,
+    alpha_sim: Annotated[
+        float,
+        typer.Option(
+            help="Weight for distillation hidden state similarity loss",
+        ),
+    ] = 1.0,
     num_workers: Annotated[
         int, typer.Option(help="Number of data loading workers")
     ] = 4,
@@ -563,6 +664,13 @@ def main(
     no_wandb: Annotated[
         bool, typer.Option("--no-wandb", help="Disable W&B logging")
     ] = False,
+    wandb_experiment_id: Annotated[
+        str | None,
+        typer.Option(
+            "--wandb-experiment-id",
+            help="W&B experiment ID to resume from, if not provided, a new run will be created",
+        ),
+    ] = None,
     cosine_anneal: Annotated[
         bool,
         typer.Option(
@@ -575,12 +683,64 @@ def main(
             help="Path to the checkpoint directory, this can be local or ffspec compatible path"
         ),
     ] = None,
+    ckpt_to_resume: Annotated[
+        str | None,
+        typer.Option(
+            help="Checkpoint to resume from, if not provided, the latest checkpoint will be used"
+        ),
+    ] = None,
+    teacher_model_name: Annotated[
+        str,
+        typer.Option(
+            help="Name of the teacher model to use for distillation, defaults to Caduceus model",
+        ),
+    ] = "kuleshov-group/caduceus-ps_seqlen-131k_d_model-256_n_layer-16",
 ) -> None:
     L.seed_everything(42, workers=True)
 
+    bed_file = (
+        bed_file
+        or get_root_path().joinpath("data", "hg38", "human-sequences.bed").as_posix()
+    )
+    fasta_file = (
+        fasta_file or get_root_path().joinpath("data", "hg38", "hg38.ml.fa").as_posix()
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        teacher_model_name,
+        trust_remote_code=True,
+        use_fast=True,
+    )
+
+    if ckpt_to_resume is not None:
+        with fsspec.open(ckpt_to_resume) as fd:
+            ckpt_state = torch.load(fd, map_location="cpu")
+        resume_global_step = ckpt_state["global_step"]
+        logger.info(
+            f"Resuming from checkpoint: {ckpt_to_resume}, {resume_global_step=}"
+        )
+    else:
+        resume_global_step = 0
+
     # NOTE: skip due to https://github.com/Open-Athena/caduceus-distill/issues/38
-    train_dataset = DistillationDataset(zarr_path_train, skip_batches={8590})
-    val_dataset = DistillationDataset(zarr_path_val)
+    train_dataset = DistillationDataset(
+        bed_file=bed_file,
+        fasta_file=fasta_file,
+        tokenizer=tokenizer,
+        split="train",
+        skip_batches={8590},
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        seq_length=seq_length,
+        start_idx=resume_global_step * accumulate_grad_batches,
+    )
+    val_dataset = DistillationDataset(
+        bed_file=bed_file,
+        fasta_file=fasta_file,
+        tokenizer=tokenizer,
+        split="valid",
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        seq_length=seq_length,
+    )
     # TODO: is this always safe to call? What if `max_val_batches` is large?
     val_dataset.warmup(max_val_batches)
 
@@ -591,16 +751,18 @@ def main(
             batch_size=batch_size,
             num_workers=num_workers,
             persistent_workers=True if num_workers > 0 else False,
-            pin_memory=True,
         )
         for ds in [train_dataset, val_dataset, val_dataset]
     ]
 
     # Initialize model
     model = StudentCaduceus(
+        teacher_model_name=teacher_model_name,
+        preload_teacher=True,
         lr=lr,
         temperature=temperature,
-        alpha=alpha,
+        alpha_soft=alpha_soft,
+        alpha_sim=alpha_sim,
         cosine_anneal=cosine_anneal,
     )
 
@@ -615,8 +777,14 @@ def main(
     logger.info(f"Run name: {full_run_name}")
 
     if not no_wandb:
-        wandb_logger = WandbLogger(project=project_name, name=full_run_name)
+        wandb_logger = WandbLogger(
+            project=project_name,
+            name=full_run_name,
+            id=wandb_experiment_id,
+            resume="must" if wandb_experiment_id else None,
+        )
 
+    # TODO: consider what should happen if we resume from a checkpoint? ATM it will create a new checkpoint directory
     if checkpoint_dirpath is not None:
         checkpoint_dirpath = f"{checkpoint_dirpath}/{full_run_name}/"
     else:
@@ -652,18 +820,25 @@ def main(
 
     # Compute the validation schedule
     if val_log_interval_sampling:
-        max_global_step = int(np.ceil(max_train_batches / accumulate_grad_batches))
+        max_global_step = (
+            int(np.ceil(max_train_batches / accumulate_grad_batches)) * max_epoch
+        )
+        validation_interval = max_global_step // val_check_interval
         val_schedule = set(
             np.logspace(
-                0,
+                validation_interval,
                 np.log10(max_global_step - 1),
                 num=max_global_step // val_check_interval,
                 dtype=int,
             )
         )
     else:
-        max_global_step = int(np.ceil(max_train_batches / accumulate_grad_batches))
-        val_schedule = set(range(0, max_global_step, val_check_interval))
+        max_global_step = (
+            int(np.ceil(max_train_batches / accumulate_grad_batches)) * max_epoch
+        )
+        val_schedule = set(
+            range(val_check_interval, max_global_step, val_check_interval)
+        )
 
     logger.info(f"Validation schedule: {sorted(val_schedule)}")
     validation_scheduler = ValidationScheduler(val_schedule)
@@ -690,15 +865,22 @@ def main(
         limit_val_batches=max_val_batches,
         limit_test_batches=max_final_val_batches,
         accumulate_grad_batches=accumulate_grad_batches,
+        # TODO: bring back default 2?
+        num_sanity_val_steps=0,
     )
     if wandb_logger is not None:
         wandb_logger.log_hyperparams(
             {
+                "teacher_model_name": teacher_model_name,
+                "bed_file": bed_file,
+                "fasta_file": fasta_file,
+                "seq_length": seq_length,
                 "batch_size": batch_size,
                 "accumulate_grad_batches": accumulate_grad_batches,
                 "learning_rate": lr,
                 "temperature": temperature,
-                "alpha": alpha,
+                "alpha_soft": alpha_soft,
+                "alpha_sim": alpha_sim,
                 "max_epochs": max_epoch,
                 "max_train_batches": max_train_batches,
                 "max_val_batches": max_val_batches,
@@ -713,7 +895,7 @@ def main(
         wandb_logger.watch(model=model, log="all", log_freq=val_check_interval)
 
     # Train model
-    trainer.fit(model, train_loader, val_loader)
+    trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_to_resume)
     trainer.test(model, test_loader)
 
 
