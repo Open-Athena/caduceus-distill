@@ -372,30 +372,36 @@ class StudentCaduceus(L.LightningModule):
         alpha_sim: float = 0.5,
         cosine_anneal: bool = False,
         preload_teacher: bool = False,
+        # NOTE: default to half of the teacher's depth and width
+        n_layer: int = 8,
+        d_model: int = 128,
     ) -> None:
         super().__init__()
         self.cosine_anneal = cosine_anneal
+        self.n_layer = n_layer
+        self.d_model = d_model
         self.save_hyperparameters()
 
         # Create student config (half depth and width)
         student_config = AutoConfig.from_pretrained(
             teacher_model_name,
             trust_remote_code=True,
-            d_model=256,  # Same as teacher's
-            n_layer=8,  # Half of teacher's 16
+            d_model=self.d_model,
+            n_layer=self.n_layer,
         )
 
         # Verify student config parameters
         assert (
-            student_config.d_model == 256
-        ), f"Expected d_model=256, got {student_config.d_model}"
+            student_config.d_model == self.d_model
+        ), f"Expected d_model={self.d_model}, got {student_config.d_model}"
         assert (
-            student_config.n_layer == 8
-        ), f"Expected n_layer=8, got {student_config.n_layer}"
+            student_config.n_layer == self.n_layer
+        ), f"Expected n_layer={self.n_layer}, got {student_config.n_layer}"
 
         self.student = AutoModelForMaskedLM.from_config(
             student_config, trust_remote_code=True
         )
+
         self.tokenizer = AutoTokenizer.from_pretrained(
             teacher_model_name, trust_remote_code=True
         )
@@ -603,6 +609,12 @@ def main(
         ),
     ] = 2
     ** 17,
+    n_layer: Annotated[
+        int, typer.Option(help="Number of layers in the student model", min=1)
+    ] = 8,
+    d_model: Annotated[
+        int, typer.Option(help="Model dimension (d_model) in the student model", min=1)
+    ] = 128,
     max_epoch: Annotated[int, typer.Option(help="Trainer max epochs", min=1)] = 1,
     max_train_batches: Annotated[
         int, typer.Option(help="Limit train batches per epoch (defaults to all)", min=1)
@@ -758,6 +770,8 @@ def main(
     # Initialize model
     model = StudentCaduceus(
         teacher_model_name=teacher_model_name,
+        n_layer=n_layer,
+        d_model=d_model,
         preload_teacher=True,
         lr=lr,
         temperature=temperature,
@@ -872,6 +886,8 @@ def main(
         wandb_logger.log_hyperparams(
             {
                 "teacher_model_name": teacher_model_name,
+                "n_layer": n_layer,
+                "d_model": d_model,
                 "bed_file": bed_file,
                 "fasta_file": fasta_file,
                 "seq_length": seq_length,
