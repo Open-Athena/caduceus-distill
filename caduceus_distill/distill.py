@@ -24,6 +24,7 @@ from transformers import (
     AutoTokenizer,
     PreTrainedTokenizerBase,
 )
+from transformers.modeling_outputs import MaskedLMOutput
 
 from caduceus_distill.data.hg38_dataset import HG38_EXAMPLE_T, HG38Dataset
 from caduceus_distill.utils.utils import get_root_path, setup_basic_logging
@@ -402,6 +403,29 @@ class StudentCaduceus(L.LightningModule):
             student_config, trust_remote_code=True
         )
 
+        teacher_config = AutoConfig.from_pretrained(
+            teacher_model_name,
+            trust_remote_code=True,
+        )
+        self.teacher_d_model = teacher_config.d_model
+        assert (
+            self.d_model <= self.teacher_d_model
+        ), f"Expected student d_model <= {self.teacher_d_model=}, got {self.d_model=}"
+
+        if self.d_model < self.teacher_d_model:
+            self.d_model_proj: torch.nn.Module = torch.nn.Linear(
+                # NOTE: we double the d_model bi-directionally of the teacher model
+                in_features=self.d_model * 2,
+                out_features=self.teacher_d_model * 2,
+                bias=False,
+            )
+            self.student.lm_head.true_dim = self.teacher_d_model
+            self.student.lm_head.lm_head = torch.nn.Linear(
+                in_features=self.teacher_d_model, out_features=16, bias=False
+            )
+        else:
+            self.d_model_proj = torch.nn.Identity()
+
         self.tokenizer = AutoTokenizer.from_pretrained(
             teacher_model_name, trust_remote_code=True
         )
@@ -418,9 +442,29 @@ class StudentCaduceus(L.LightningModule):
         self.alpha_sim = alpha_sim
 
     def forward(
-        self, input_ids: torch.Tensor, output_hidden_states: bool = False
-    ) -> Any:
-        return self.student(input_ids, output_hidden_states=output_hidden_states)
+        self,
+        input_ids: torch.LongTensor,
+        output_hidden_states: bool | None = None,
+        **kwargs: Any,
+    ) -> MaskedLMOutput:
+        outputs = self.student.caduceus(
+            input_ids=input_ids,
+            output_hidden_states=output_hidden_states,
+        )
+
+        hidden_states = outputs[0]
+        B, S, D = hidden_states.shape
+        hidden_states = self.d_model_proj(hidden_states)
+        if output_hidden_states:
+            outputs.hidden_states.append(hidden_states)
+        assert hidden_states.shape == (B, S, self.teacher_d_model * 2)
+        logits = self.student.lm_head(hidden_states)
+        logits = logits.float()
+
+        return MaskedLMOutput(
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+        )
 
     def training_step(self, batch: HG38_EXAMPLE_T, batch_idx: int) -> torch.Tensor:
         input_ids, chr_names, starts, ends = batch
@@ -431,7 +475,7 @@ class StudentCaduceus(L.LightningModule):
             teacher_logits = outputs.logits
             teacher_emb = outputs.hidden_states[-1]
 
-        outputs = self.student(input_ids, output_hidden_states=True)
+        outputs = self(input_ids, output_hidden_states=True)
         student_logits = outputs.logits
         student_emb = outputs.hidden_states[-1]
 
@@ -468,7 +512,7 @@ class StudentCaduceus(L.LightningModule):
         input_ids, chr_names, starts, ends = batch
         logger.debug(f"Validation {batch_idx=}, {chr_names=}, {starts=}, {ends=}")
 
-        outputs = self.student(input_ids, output_hidden_states=True)
+        outputs = self(input_ids, output_hidden_states=True)
         student_logits = outputs.logits
         student_emb = outputs.hidden_states[-1]
         with torch.no_grad():
