@@ -202,6 +202,8 @@ def test_filter_non_specific_nucleotides_filter_all(basic_inputs):
         )
     )
 
+    assert student_emb is not None
+    assert teacher_emb is not None
     assert targets.size(0) == 0
     assert student_logits.size(0) == 0
     assert teacher_logits.size(0) == 0

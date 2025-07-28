@@ -37,10 +37,12 @@ logger = logging.getLogger(__name__)
 def _filter_non_specific_nucleotides_and_batch(
     student_logits: torch.Tensor,
     teacher_logits: torch.Tensor,
-    student_emb: torch.Tensor,
-    teacher_emb: torch.Tensor,
+    student_emb: torch.Tensor | None,
+    teacher_emb: torch.Tensor | None,
     input_ids: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor
+]:
     """
     This function filters out the examples where the label is the non-specific nucleotide (PAD token).
     """
@@ -49,13 +51,13 @@ def _filter_non_specific_nucleotides_and_batch(
     student_logits = student_logits[mask]
     teacher_logits = teacher_logits[mask]
     input_ids = input_ids[mask]
-    student_emb = student_emb[mask]
-    teacher_emb = teacher_emb[mask]
+    student_emb = student_emb[mask] if student_emb is not None else None
+    teacher_emb = teacher_emb[mask] if teacher_emb is not None else None
 
     assert student_logits.ndim == 2
     assert teacher_logits.ndim == 2
-    assert student_emb.ndim == 2
-    assert teacher_emb.ndim == 2
+    assert student_emb.ndim == 2 if student_emb is not None else True
+    assert teacher_emb.ndim == 2 if teacher_emb is not None else True
     assert input_ids.ndim == 1
 
     return student_logits, teacher_logits, student_emb, teacher_emb, input_ids
@@ -65,8 +67,8 @@ def distillation_loss(
     *,
     student_logits: torch.Tensor,
     teacher_logits: torch.Tensor,
-    student_emb: torch.Tensor,
-    teacher_emb: torch.Tensor,
+    student_emb: torch.Tensor | None,
+    teacher_emb: torch.Tensor | None,
     input_ids: torch.Tensor,
     temperature: float,
     alpha_soft: float,
@@ -101,12 +103,17 @@ def distillation_loss(
     assert input_ids.ndim == 2, f"Expected input_ids to be 2D, got {input_ids.ndim}D"
 
     # Expect B, T, D
-    assert (
-        student_emb.ndim == 3
-    ), f"Expected student_emb to be 3D, got {student_emb.ndim}D"
-    assert (
-        teacher_emb.ndim == 3
-    ), f"Expected teacher_emb to be 3D, got {teacher_emb.ndim}D"
+    assert (student_emb is None) == (
+        teacher_emb is None
+    ), "Both student_emb and teacher_emb must be either None or not None"
+    if student_emb is not None:
+        assert teacher_emb is not None
+        assert (
+            student_emb.ndim == 3
+        ), f"Expected student_emb to be 3D, got {student_emb.ndim}D"
+        assert (
+            teacher_emb.ndim == 3
+        ), f"Expected teacher_emb to be 3D, got {teacher_emb.ndim}D"
 
     student_logits, teacher_logits, student_emb, teacher_emb, input_ids = (
         _filter_non_specific_nucleotides_and_batch(
@@ -160,16 +167,20 @@ def distillation_loss(
     soft_loss_contrib = alpha_soft * soft_loss
     hard_loss_contrib = alpha_hard * hard_loss
 
-    hidden_state_sim = F.cosine_embedding_loss(
-        student_emb,
-        teacher_emb,
-        torch.ones(
-            student_emb.size(0),
-            device=student_emb.device,
-        ),
-        reduction="mean",
-    )
-    hidden_state_sim = alpha_sim * hidden_state_sim
+    if alpha_sim > 0:
+        assert student_emb is not None and teacher_emb is not None
+        hidden_state_sim = F.cosine_embedding_loss(
+            student_emb,
+            teacher_emb,
+            torch.ones(
+                student_emb.size(0),
+                device=student_emb.device,
+            ),
+            reduction="mean",
+        )
+        hidden_state_sim = alpha_sim * hidden_state_sim
+    else:
+        hidden_state_sim = torch.tensor(0.0, device=input_ids.device, dtype=torch.float)
 
     total_loss = soft_loss_contrib + hard_loss_contrib + hidden_state_sim
     return total_loss, soft_loss_contrib, hard_loss_contrib, hidden_state_sim
@@ -412,7 +423,7 @@ class StudentCaduceus(L.LightningModule):
             self.d_model <= self.teacher_d_model
         ), f"Expected student d_model <= {self.teacher_d_model=}, got {self.d_model=}"
 
-        if self.d_model < self.teacher_d_model:
+        if alpha_sim > 0 and self.d_model < self.teacher_d_model:
             self.d_model_proj: torch.nn.Module = torch.nn.Linear(
                 # NOTE: we double the d_model bi-directionally of the teacher model
                 in_features=self.d_model * 2,
@@ -447,37 +458,46 @@ class StudentCaduceus(L.LightningModule):
         output_hidden_states: bool | None = None,
         **kwargs: Any,
     ) -> MaskedLMOutput:
-        outputs = self.student.caduceus(
-            input_ids=input_ids,
-            output_hidden_states=output_hidden_states,
-        )
+        if self.alpha_sim > 0:
+            outputs = self.student.caduceus(
+                input_ids=input_ids,
+                output_hidden_states=output_hidden_states,
+            )
 
-        hidden_states = outputs[0]
-        B, S, D = hidden_states.shape
-        hidden_states = self.d_model_proj(hidden_states)
-        if output_hidden_states:
-            outputs.hidden_states.append(hidden_states)
-        assert hidden_states.shape == (B, S, self.teacher_d_model * 2)
-        logits = self.student.lm_head(hidden_states)
-        logits = logits.float()
+            hidden_states = outputs[0]
+            B, S, _ = hidden_states.shape
+            hidden_states = self.d_model_proj(hidden_states)
+            if output_hidden_states:
+                outputs.hidden_states.append(hidden_states)
+            assert hidden_states.shape == (B, S, self.teacher_d_model * 2)
+            logits = self.student.lm_head(hidden_states)
+            logits = logits.float()
 
-        return MaskedLMOutput(
-            logits=logits,
-            hidden_states=outputs.hidden_states,
-        )
+            return MaskedLMOutput(
+                logits=logits,
+                hidden_states=outputs.hidden_states,
+            )
+        else:
+            return self.student(
+                input_ids=input_ids,
+                output_hidden_states=output_hidden_states,
+                **kwargs,
+            )
 
     def training_step(self, batch: HG38_EXAMPLE_T, batch_idx: int) -> torch.Tensor:
         input_ids, chr_names, starts, ends = batch
         logger.debug(f"Train {batch_idx=}, {chr_names=}, {starts=}, {ends=}")
 
         with torch.no_grad():
-            outputs = self.teacher(input_ids.to(self.device), output_hidden_states=True)
+            outputs = self.teacher(
+                input_ids.to(self.device), output_hidden_states=self.alpha_sim > 0
+            )
             teacher_logits = outputs.logits
-            teacher_emb = outputs.hidden_states[-1]
+            teacher_emb = outputs.hidden_states[-1] if self.alpha_sim > 0 else None
 
-        outputs = self(input_ids, output_hidden_states=True)
+        outputs = self(input_ids, output_hidden_states=self.alpha_sim > 0)
         student_logits = outputs.logits
-        student_emb = outputs.hidden_states[-1]
+        student_emb = outputs.hidden_states[-1] if self.alpha_sim > 0 else None
 
         # Calculate combined loss
         loss, soft_loss, hard_loss, hidden_state_sim_loss = distillation_loss(
