@@ -1,8 +1,4 @@
-<p align="center">
-Caduceus Distill
-</p>
-
----
+<h1>⚕ Caduceus Distill</h1>
 
 This repo is an experiment in distllation of the [Caduceus](https://github.com/kuleshov-group/caduceus) DNA model.
 
