@@ -53,6 +53,9 @@ dev = [
     "types-tqdm>=4.67.0.20250516",
 ]
 
+[project.scripts]
+distill = "caduceus_distill.distill:app"
+
 #
 # Ruff configuration
 #

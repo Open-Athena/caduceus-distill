@@ -33,6 +33,8 @@ CADUCEUS_PAD_TOKEN_ID = 4
 
 logger = logging.getLogger(__name__)
 
+app = typer.Typer()
+
 
 def _filter_non_specific_nucleotides_and_batch(
     student_logits: torch.Tensor,
@@ -653,6 +655,7 @@ class StudentCaduceus(L.LightningModule):
         return optimizer
 
 
+@app.command()
 def main(
     bed_file: Annotated[
         str | None,
@@ -725,18 +728,18 @@ def main(
     num_workers: Annotated[
         int, typer.Option(help="Number of data loading workers")
     ] = 4,
-    project_name: Annotated[
-        str, typer.Option(help="W&B project name")
-    ] = "caduceus_distill",
-    run_name_suffix: Annotated[
-        str, typer.Option(help="Optional suffix to append to run name")
-    ] = "",
     accumulate_grad_batches: Annotated[
         int,
         typer.Option(
             help="Number of batches to accumulate gradients over (default: 1, no accumulation)",
         ),
     ] = 1,
+    wandb_project_name: Annotated[
+        str, typer.Option(help="W&B project name")
+    ] = "caduceus_distill",
+    wandb_experimen_name_suffix: Annotated[
+        str, typer.Option(help="Optional suffix to append to run name")
+    ] = "",
     no_wandb: Annotated[
         bool, typer.Option("--no-wandb", help="Disable W&B logging")
     ] = False,
@@ -849,14 +852,14 @@ def main(
 
     datetime_str = datetime.now(UTC).strftime("%Y%m%d_%H%M")
     run_name_parts = [datetime_str]
-    if run_name_suffix:
-        run_name_parts.append(run_name_suffix)
+    if wandb_experimen_name_suffix:
+        run_name_parts.append(wandb_experimen_name_suffix)
     full_run_name = "_".join(run_name_parts)
     logger.info(f"Run name: {full_run_name}")
 
     if not no_wandb:
         wandb_logger = WandbLogger(
-            project=project_name,
+            project=wandb_project_name,
             name=full_run_name,
             id=wandb_experiment_id,
             resume="must" if wandb_experiment_id else None,
@@ -984,4 +987,4 @@ if __name__ == "__main__":
     # Set start method to 'spawn' to prevent fork-safety issues with
     # multi-threaded libraries (e.g. zarr) in worker processes.
     multiprocessing.set_start_method("spawn")
-    typer.run(main)
+    app()
