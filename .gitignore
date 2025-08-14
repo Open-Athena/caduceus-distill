@@ -3,6 +3,9 @@
 checkpoints/
 wandb/
 .env
+.ipynb_checkpoints/
+.vscode/
+lightning_logs/
 
 # Python-generated files
 __pycache__/
